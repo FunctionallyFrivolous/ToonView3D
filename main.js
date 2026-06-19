@@ -7,10 +7,15 @@ import {
   mergeVertices
 } from "https://esm.sh/three@0.164.0/examples/jsm/utils/BufferGeometryUtils.js";
 
+let highlightMesh = null;
+
+let pointerDown = false;
+let moved = false;
+let downX = 0;
+let downY = 0;
 
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
-
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xeeeeee);
@@ -92,6 +97,20 @@ loader.load("model.obj", (obj) => {
 
     // child.userData.defaultColor = defaultFaceMaterial.color.clone();
     // child.userData.defaultOpacity = defaultFaceMaterial.opacity;
+
+    const edges = new THREE.EdgesGeometry(child.geometry, 20); // 1° threshold
+    const edgeLines = new THREE.LineSegments(
+        edges,
+        new THREE.LineBasicMaterial({
+            color: 0x000000,
+            linewidth: 1
+        })
+    );
+    edgeLines.raycast = () => {};
+    edgeLines.material.depthTest = false;
+    edgeLines.material.depthWrite = false;
+    edgeLines.renderOrder = 2;
+    child.add(edgeLines);
 
     }
   });

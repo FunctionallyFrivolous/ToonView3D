@@ -23,11 +23,27 @@ const camera = new THREE.PerspectiveCamera(
 );
 camera.position.set(3, 3, 3);
 
+const aspect = window.innerWidth / window.innerHeight;
+const orthoSize = 4; // adjust to taste
+
+const orthoCamera = new THREE.OrthographicCamera(
+    -orthoSize * aspect,
+    orthoSize * aspect,
+    orthoSize,
+    -orthoSize,
+    0.1,
+    1000
+);
+orthoCamera.position.copy(camera.position);
+orthoCamera.lookAt(0, 0, 0);
+
+let activeCamera = orthoCamera
+
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-const controls = new OrbitControls(camera, renderer.domElement);
+const controls = new OrbitControls(activeCamera, renderer.domElement);
 controls.enableDamping = true;
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.8));
@@ -35,47 +51,16 @@ const dir = new THREE.DirectionalLight(0xffffff, 0.8);
 dir.position.set(5, 5, 5);
 scene.add(dir);
 
+const defaultFaceMaterial = new THREE.MeshStandardMaterial({
+    color: 0xcccccc,     // light gray default
+    opacity: 0.5,
+    transparent: true,
+    roughness: 0.6,
+    metalness: 0.0,
+    // flatShading: false,
+});
+
 const loader = new OBJLoader();
-// loader.load("model.obj", (obj) => {
-//   obj.traverse((child) => {
-//     if (child.isMesh) {
-//       child.material = new THREE.MeshStandardMaterial({
-//         color: 0xcccccc,
-//         flatShading: true,
-//       });
-//     }
-//   });
-//   scene.add(obj);
-// });
-// loader.load("model.obj", (obj) => {
-//   obj.traverse((child) => {
-//     if (child.isMesh) {
-//         child.geometry.deleteAttribute("normal");
-//         child.geometry.computeVertexNormals();   // ← smooth shading fix
-//         child.material = new THREE.MeshStandardMaterial({
-//             color: 0xcccccc,
-//             flatShading: false,                    // ← smooth shading ON
-//         });
-//     }
-//   });
-//   scene.add(obj);
-// });
-// loader.load("model.obj", (obj) => {
-//   obj.traverse((child) => {
-//     if (child.isMesh) {
-//       child.geometry = BufferGeometryUtils.mergeVertices(child.geometry);
-//       child.geometry.computeVertexNormals();
-
-//       child.material = new THREE.MeshStandardMaterial({
-//         color: 0xcccccc,
-//         flatShading: false,
-//       });
-//     }
-//   });
-//   scene.add(obj);
-// });
-
-let surfaceClusters = null;
 
 loader.load("model.obj", (obj) => {
   obj.traverse((child) => {
@@ -89,38 +74,51 @@ loader.load("model.obj", (obj) => {
       // Weld vertices (Fusion OBJ often needs this)
       child.geometry = mergeVertices(child.geometry);
 
+    //   child.geometry = weldByPosition(child.geometry);
+
       // Recompute smooth normals
       child.geometry.computeVertexNormals();
 
     //   surfaceClusters = buildSurfaceClusters(child.geometry, 25); // 12° threshold
-        child.userData.surfaceClusters = buildSurfaceClusters(child.geometry, 170);
+        child.userData.surfaceClusters = buildSurfaceClusters(child.geometry, 179);
     //   console.log("Surface clusters:", surfaceClusters);
 
       // Smooth shading
-      child.material = new THREE.MeshStandardMaterial({
-        color: 0xcccccc,
-        flatShading: false,
-      });
+      child.material = defaultFaceMaterial.clone();
+    //   child.material = new THREE.MeshStandardMaterial({
+    //     color: 0xcccccc,
+    //     flatShading: false,
+    //   });
+
+    // child.userData.defaultColor = defaultFaceMaterial.color.clone();
+    // child.userData.defaultOpacity = defaultFaceMaterial.opacity;
+
     }
   });
 
   scene.add(obj);
 });
 
+// FUNCTIONS
+
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
-  renderer.render(scene, camera);
+  renderer.render(scene, activeCamera);
 }
 animate();
 
-window.addEventListener("resize", () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
+function deselectAllFaces() {
+    if (highlightMesh) {
+        scene.remove(highlightMesh);
+        highlightMesh.geometry.dispose();
+        highlightMesh.material.dispose();
+        highlightMesh = null;
+    }
 
-window.addEventListener("pointerdown", onPointerDown);
+    // selectedFaceCluster = null;  // if you track this
+    // clear UI, etc.
+}
 
 function onPointerDown(event) {
   // Convert screen coords → normalized device coords
@@ -128,7 +126,7 @@ function onPointerDown(event) {
   mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
   // Cast a ray from camera through the mouse position
-  raycaster.setFromCamera(mouse, camera);
+  raycaster.setFromCamera(mouse, activeCamera);
 
   // Intersect with all meshes in the scene
   const intersects = raycaster.intersectObjects(scene.children, true);
@@ -141,21 +139,10 @@ function onPointerDown(event) {
     console.log("Face:", hit.face);
 
     highlightFace(hit);
-  }
+  } else {
+    deselectAllFaces();
 }
-
-let lastHighlight = null;
-
-// function highlightFace(hit) {
-//   if (lastHighlight) {
-//     lastHighlight.material.emissive.setHex(0x000000);
-//   }
-
-//   hit.object.material.emissive = new THREE.Color(0x3333ff);
-//   lastHighlight = hit.object;
-// }
-
-let highlightMesh = null;
+}
 
 function highlightFace(hit) {
   const clusters = hit.object.userData.surfaceClusters;
@@ -214,115 +201,51 @@ function highlightFace(hit) {
   scene.add(highlightMesh);
 }
 
+function weldByPosition(geometry, tolerance = 1e-5) {
+  const pos = geometry.attributes.position;
+  const index = geometry.index;
+  const vertCount = pos.count;
 
-// function highlightFace(hit) {
-//   const clusters = hit.object.userData.surfaceClusters;
-//   if (!clusters) return;
+  const newVerts = [];
+  const newIndex = new Array(index.count);
 
-//   const faceIndex = hit.faceIndex;
-//   const cluster = clusters.find(c => c.includes(faceIndex));
-//   if (!cluster) return;
-//   console.log("made it here");
+  const map = new Map();
 
-//   // Remove previous highlight
-//   if (highlightMesh) {
-//     scene.remove(highlightMesh);
-//     highlightMesh.geometry.dispose();
-//     highlightMesh.material.dispose();
-//     highlightMesh = null;
-//   }
+  const key = (x, y, z) =>
+    `${Math.round(x / tolerance)}_${Math.round(y / tolerance)}_${Math.round(z / tolerance)}`;
 
-//   // Build geometry for all faces in the cluster
-//   const geometry = hit.object.geometry;
-//   const index = geometry.index;
-//   const pos = geometry.attributes.position;
+  for (let i = 0; i < vertCount; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
 
-//   const verts = [];
-//   const inds = [];
+    const k = key(x, y, z);
 
-//   let vCount = 0;
+    if (!map.has(k)) {
+      map.set(k, newVerts.length);
+      newVerts.push(x, y, z);
+    }
+  }
 
-//   for (const f of cluster) {
-//     const a = index.getX(f * 3 + 0);
-//     const b = index.getX(f * 3 + 1);
-//     const c = index.getX(f * 3 + 2);
+  // Build new index buffer
+  for (let i = 0; i < index.count; i++) {
+    const vi = index.getX(i);
+    const x = pos.getX(vi);
+    const y = pos.getY(vi);
+    const z = pos.getZ(vi);
+    const k = key(x, y, z);
+    newIndex[i] = map.get(k);
+  }
 
-//     const vA = new THREE.Vector3().fromBufferAttribute(pos, a);
-//     const vB = new THREE.Vector3().fromBufferAttribute(pos, b);
-//     const vC = new THREE.Vector3().fromBufferAttribute(pos, c);
+  const newGeo = new THREE.BufferGeometry();
+  newGeo.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(newVerts, 3)
+  );
+  newGeo.setIndex(newIndex);
 
-//     verts.push(vA, vB, vC);
-//     inds.push(vCount, vCount + 1, vCount + 2);
-//     vCount += 3;
-//   }
-
-//   const highlightGeo = new THREE.BufferGeometry().setFromPoints(verts);
-//   highlightGeo.setIndex(inds);
-//   highlightGeo.computeVertexNormals();
-
-//   const highlightMat = new THREE.MeshBasicMaterial({
-//     color: 0xff0000,
-//     side: THREE.DoubleSide,
-//     transparent: true,
-//     opacity: 0.5
-//   });
-
-//   highlightMesh = new THREE.Mesh(highlightGeo, highlightMat);
-
-//   hit.object.localToWorld(highlightMesh.position);
-//   highlightMesh.quaternion.copy(hit.object.getWorldQuaternion(new THREE.Quaternion()));
-//   highlightMesh.scale.copy(hit.object.getWorldScale(new THREE.Vector3()));
-
-//   scene.add(highlightMesh);
-// }
-
-
-// function highlightFace(hit) {
-//   // Remove previous highlight
-//   if (highlightMesh) {
-//     scene.remove(highlightMesh);
-//     highlightMesh.geometry.dispose();
-//     highlightMesh.material.dispose();
-//     highlightMesh = null;
-//   }
-
-//   const geometry = hit.object.geometry;
-//   const index = geometry.index;
-//   const pos = geometry.attributes.position;
-
-//   // Get the 3 vertex indices of the picked face
-//   const a = index.getX(hit.faceIndex * 3 + 0);
-//   const b = index.getX(hit.faceIndex * 3 + 1);
-//   const c = index.getX(hit.faceIndex * 3 + 2);
-
-//   // Extract vertex positions
-//   const vA = new THREE.Vector3().fromBufferAttribute(pos, a);
-//   const vB = new THREE.Vector3().fromBufferAttribute(pos, b);
-//   const vC = new THREE.Vector3().fromBufferAttribute(pos, c);
-
-//   // Build a new geometry for the highlight triangle
-//   const highlightGeo = new THREE.BufferGeometry().setFromPoints([vA, vB, vC]);
-//   highlightGeo.setIndex([0, 1, 2]);
-//   highlightGeo.computeVertexNormals();
-
-//   // Highlight material
-//   const highlightMat = new THREE.MeshBasicMaterial({
-//     color: 0xff0000,
-//     side: THREE.DoubleSide,
-//     transparent: true,
-//     opacity: 0.6
-//   });
-
-//   // Create the highlight mesh
-//   highlightMesh = new THREE.Mesh(highlightGeo, highlightMat);
-
-//   // Position it in the same coordinate space as the original mesh
-//   hit.object.localToWorld(highlightMesh.position);
-//   highlightMesh.quaternion.copy(hit.object.getWorldQuaternion(new THREE.Quaternion()));
-//   highlightMesh.scale.copy(hit.object.getWorldScale(new THREE.Vector3()));
-
-//   scene.add(highlightMesh);
-// }
+  return newGeo;
+}
 
 function buildAdjacency(geometry) {
   const index = geometry.index;
@@ -370,12 +293,6 @@ function buildSurfaceClusters(geometry, angleThresholdDeg = 10) {
 
   const angleThreshold = Math.cos(THREE.MathUtils.degToRad(angleThresholdDeg));
 
-//   function faceNormal(f) {
-//     const nx = normals.getX(f * 3);
-//     const ny = normals.getY(f * 3);
-//     const nz = normals.getZ(f * 3);
-//     return new THREE.Vector3(nx, ny, nz).normalize();
-//   }
 function faceNormal(f, geometry) {
   const index = geometry.index;
   const pos = geometry.attributes.position;
@@ -429,54 +346,76 @@ function faceNormal(f, geometry) {
   return clusters;
 }
 
+function toggleCameraMode() {
+    if (activeCamera === camera) {
+        // Switch to ortho
+        orthoCamera.position.copy(camera.position);
+        orthoCamera.quaternion.copy(camera.quaternion);
+        activeCamera = orthoCamera;
+    } else {
+        // Switch to perspective
+        camera.position.copy(orthoCamera.position);
+        camera.quaternion.copy(orthoCamera.quaternion);
+        activeCamera = camera;
+    }
 
+    controls.object = activeCamera;
+    controls.update();
+}
 
-// // import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.164.0/build/three.module.js";
-// // import { OrbitControls } from "https://cdn.jsdelivr.net/npm/three@0.164.0/examples/jsm/controls/OrbitControls.js";
-// // import { GLTFLoader } from "https://cdn.jsdelivr.net/npm/three@0.164.0/examples/jsm/loaders/GLTFLoader.js";
+// HANDLERS
 
-// import * as THREE from "https://esm.sh/three@0.164.0";
-// import { OrbitControls } from "https://esm.sh/three@0.164.0/examples/jsm/controls/OrbitControls.js";
-// import { GLTFLoader } from "https://esm.sh/three@0.164.0/examples/jsm/loaders/GLTFLoader.js";
+window.addEventListener("resize", () => {
+  activeCamera.aspect = window.innerWidth / window.innerHeight;
+  activeCamera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
 
+// window.addEventListener("pointerdown", onPointerDown);
+window.addEventListener("pointerdown", (e) => {
+    pointerDown = true;
+    moved = false;
+    downX = e.clientX;
+    downY = e.clientY;
+});
+window.addEventListener("pointermove", (e) => {
+    if (!pointerDown) return;
 
-// const scene = new THREE.Scene();
-// scene.background = new THREE.Color(0xeeeeee);
+    const dx = e.clientX - downX;
+    const dy = e.clientY - downY;
 
-// const camera = new THREE.PerspectiveCamera(
-//   45,
-//   window.innerWidth / window.innerHeight,
-//   0.1,
-//   1000
-// );
-// camera.position.set(3, 3, 3);
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+        moved = true;
+    }
+});
+window.addEventListener("pointerup", (e) => {
+    pointerDown = false;
 
-// const renderer = new THREE.WebGLRenderer({ antialias: true });
-// renderer.setSize(window.innerWidth, window.innerHeight);
-// document.body.appendChild(renderer.domElement);
+    if (moved) {
+        // It was a drag → do NOT change selection
+        return;
+    }
 
-// const controls = new OrbitControls(camera, renderer.domElement);
-// controls.enableDamping = true;
+    onPointerDown(e)
+});
 
-// scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-// const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-// dir.position.set(5, 5, 5);
-// scene.add(dir);
+window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+        deselectAllFaces();
+    }
+});
 
-// const loader = new GLTFLoader();
-// loader.load("model.glb", (gltf) => {
-//   scene.add(gltf.scene);
-// });
+window.addEventListener("resize", () => {
+    const aspect = window.innerWidth / window.innerHeight;
 
-// function animate() {
-//   requestAnimationFrame(animate);
-//   controls.update();
-//   renderer.render(scene, camera);
-// }
-// animate();
+    camera.aspect = aspect;
+    camera.updateProjectionMatrix();
 
-// window.addEventListener("resize", () => {
-//   camera.aspect = window.innerWidth / window.innerHeight;
-//   camera.updateProjectionMatrix();
-//   renderer.setSize(window.innerWidth, window.innerHeight);
-// });
+    orthoCamera.left = -orthoSize * aspect;
+    orthoCamera.right = orthoSize * aspect;
+    orthoCamera.top = orthoSize;
+    orthoCamera.bottom = -orthoSize;
+    orthoCamera.updateProjectionMatrix();
+
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});

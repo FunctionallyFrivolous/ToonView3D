@@ -7,6 +7,35 @@
       body { margin: 0; overflow: hidden; }
     </style>
   </head>
+    <div id="colorPanel" style="
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        background: #ffffffee;
+        padding: 12px;
+        border-radius: 8px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        font-family: sans-serif;
+        z-index: 9999;
+        ">
+        <label>Face Color:</label><br>
+        <input type="color" id="faceColor" value="#ff8800"><br><br>
+
+        <label>Opacity:</label><br>
+        <input type="range" id="faceOpacity" min="0" max="1" step="0.01" value="0.6">
+        <br><br>
+        <button id="modeToggle" style="
+            padding: 6px 12px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+            ">
+            Paint Mode
+            </button>
+
+
+    </div>
+
   <body>
     
     

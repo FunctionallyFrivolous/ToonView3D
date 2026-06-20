@@ -19,6 +19,14 @@ let boundaryEdges = null;
 
 const HIGHLIGHT_LAYER = 2;
 
+let currentSelectedMesh = null;
+let currentSelectedCluster = null;
+
+const undoStack = [];
+const redoStack = [];
+
+let pickMode = false;
+
 
 let pointerDown = false;
 let moved = false;
@@ -176,10 +184,70 @@ loader.load("model.obj", (obj) => {
 
 // FUNCTIONS
 
+function loadFacePropertiesFromCluster(mesh, cluster) {
+  const geo = mesh.geometry;
+  const colors = geo.attributes.color;
+  const index = geo.index;
+
+  const f = cluster[0];
+  const i0 = index.getX(f * 3 + 0);
+
+  const r = colors.getX(i0);
+  const g = colors.getY(i0);
+  const b = colors.getZ(i0);
+  const a = colors.getW(i0);
+
+  const hex = new THREE.Color(r, g, b).getHexString();
+
+  colorInput.value = `#${hex}`;
+  opacityInput.value = a;
+}
+
+
+function undo() {
+  if (undoStack.length === 0) return;
+
+  const op = undoStack.pop();
+  const geo = op.mesh.geometry;
+  const colors = geo.attributes.color;
+
+  // Restore previous colors
+  op.previousColors.forEach(p => {
+    colors.setX(p.index, p.r);
+    colors.setY(p.index, p.g);
+    colors.setZ(p.index, p.b);
+    colors.setW(p.index, p.a);
+  });
+
+  colors.needsUpdate = true;
+
+  redoStack.push(op);
+}
+
+function redo() {
+  if (redoStack.length === 0) return;
+
+  const op = redoStack.pop();
+
+  // Reapply the paint operation
+  paintCluster(
+    op.mesh,
+    op.cluster,
+    op.newColor,
+    op.newOpacity,
+    false // don't record history again
+  );
+
+  undoStack.push(op);
+}
+
+
 function paintCluster(mesh, cluster, color, opacity) {
   const geo = mesh.geometry;
   const index = geo.index;
   const colors = geo.attributes.color;
+
+  const previousColors = [];
 
   for (const f of cluster) {
     const i0 = index.getX(f*3 + 0);
@@ -191,14 +259,45 @@ function paintCluster(mesh, cluster, color, opacity) {
 //     });
 //   }
     [i0, i1, i2].forEach(i => {
-        colors.setX(i, color.r);
-        colors.setY(i, color.g);
-        colors.setZ(i, color.b);
-        colors.setW(i, opacity);
-        });
+      previousColors.push({
+        index: i,
+        r: colors.getX(i),
+        g: colors.getY(i),
+        b: colors.getZ(i),
+        a: colors.getW(i)
+      });
+    });
     }
 
+    // Apply new color
+  for (const f of cluster) {
+    const i0 = index.getX(f * 3 + 0);
+    const i1 = index.getX(f * 3 + 1);
+    const i2 = index.getX(f * 3 + 2);
+
+    [i0, i1, i2].forEach(i => {
+      colors.setX(i, color.r);
+      colors.setY(i, color.g);
+      colors.setZ(i, color.b);
+      colors.setW(i, opacity);
+    });
+  }
+
   colors.needsUpdate = true;
+
+  // Record undo history
+//   if (recordHistory) {
+    undoStack.push({
+      mesh,
+      cluster,
+      previousColors,
+      newColor: color.clone(),
+      newOpacity: opacity
+    });
+
+    // Clear redo stack on new action
+    redoStack.length = 0;
+//   }
 }
 
 
@@ -287,12 +386,12 @@ function animate() {
 animate();
 
 function deselectAllFaces() {
-    if (highlightMesh) {
-        scene.remove(highlightMesh);
-        highlightMesh.geometry.dispose();
-        highlightMesh.material.dispose();
-        highlightMesh = null;
-    }
+    // if (highlightMesh) {
+    //     scene.remove(highlightMesh);
+    //     highlightMesh.geometry.dispose();
+    //     highlightMesh.material.dispose();
+    //     highlightMesh = null;
+    // }
 
     if (boundaryEdges) {
   scene.remove(boundaryEdges);
@@ -301,9 +400,10 @@ function deselectAllFaces() {
   boundaryEdges = null;
 }
 
+    currentSelectedMesh = null;
+    currentSelectedCluster = null;
 
     // selectedFaceCluster = null;  // if you track this
-    // clear UI, etc.
 }
 
 function onPointerDown(event) {
@@ -335,14 +435,34 @@ activeCamera.layers.enableAll();
 }
 
 function highlightFace(hit) {
+    
   const clusters = hit.object.userData.surfaceClusters;
   if (!clusters) return;
 
   const faceIndex = hit.faceIndex;
+  if (faceIndex == null) return;
   const cluster = clusters.find(c => c.includes(faceIndex));
   if (!cluster) return;
 
-  paintCluster(hit.object, cluster, new THREE.Color(0xff0000), 0.5);
+  deselectAllFaces();
+  currentSelectedMesh = hit.object;
+  currentSelectedCluster = cluster;
+
+  if (pickMode) {
+    loadFacePropertiesFromCluster(hit.object, cluster);
+    return; // Do NOT paint
+  }
+
+  // ----------------------------
+  // PAINT MODE BEHAVIOR (default)
+  // ----------------------------
+  const color = new THREE.Color(colorInput.value);
+  const opacity = parseFloat(opacityInput.value);
+
+  paintCluster(hit.object, cluster, color, opacity);
+
+//   paintCluster(hit.object, cluster, new THREE.Color(0xff0000), 0.5);
+//   paintCluster(hit.object, cluster, new THREE.Color(colorInput.value), parseFloat(opacityInput.value));
 
 
 //   // Remove previous highlight
@@ -375,6 +495,10 @@ function highlightFace(hit) {
     inds.push(vCount, vCount + 1, vCount + 2);
     vCount += 3;
   }
+
+    currentSelectedMesh = hit.object;
+    currentSelectedCluster = cluster;
+
 
 //   const highlightGeo = new THREE.BufferGeometry();
 //   highlightGeo.setFromPoints(verts);
@@ -590,6 +714,16 @@ function toggleCameraMode() {
 
 // HANDLERS
 
+window.addEventListener("keydown", (e) => {
+  if (e.ctrlKey && e.key === "z") {
+    undo();
+  }
+  if (e.ctrlKey && e.key === "y") {
+    redo();
+  }
+});
+
+
 window.addEventListener("resize", () => {
   activeCamera.aspect = window.innerWidth / window.innerHeight;
   activeCamera.updateProjectionMatrix();
@@ -644,3 +778,55 @@ window.addEventListener("resize", () => {
 
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
+
+
+// UI: Color picker + opacity slider
+const colorInput = document.getElementById("faceColor");
+const opacityInput = document.getElementById("faceOpacity");
+
+function applyUIFacePaint() {
+  if (!currentSelectedMesh || !currentSelectedCluster) return;
+
+  const color = new THREE.Color(colorInput.value);
+  const opacity = parseFloat(opacityInput.value);
+
+  paintCluster(currentSelectedMesh, currentSelectedCluster, color, opacity);
+}
+
+// Apply when user changes color
+colorInput.addEventListener("input", applyUIFacePaint);
+
+// Apply when user changes opacity
+opacityInput.addEventListener("input", applyUIFacePaint);
+
+const colorPanel = document.getElementById("colorPanel");
+
+colorPanel.addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+});
+
+colorPanel.addEventListener("pointerup", (e) => {
+  e.stopPropagation();
+});
+
+// const pickBtn = document.getElementById("togglePickMode");
+
+// pickBtn.addEventListener("click", () => {
+//   pickMode = !pickMode;
+//   pickBtn.textContent = pickMode ? "Pick Mode: ON" : "Pick Mode: OFF";
+// });
+
+const modeToggle = document.getElementById("modeToggle");
+
+modeToggle.addEventListener("click", () => {
+  pickMode = !pickMode;
+
+  if (pickMode) {
+    modeToggle.textContent = "Pick Mode";
+    // modeToggle.style.background = "#2196f3"; // blue
+  } else {
+    modeToggle.textContent = "Paint Mode";
+    // modeToggle.style.background = "#4caf50"; // green
+  }
+});
+

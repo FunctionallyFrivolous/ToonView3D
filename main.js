@@ -618,6 +618,27 @@ window.addEventListener("keyup", (e) => {
 // Resize
 // ------------------------------------------------------------
 
+function updateAllLineResolutions() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+
+    // Iterate over all meshes in the scene
+    scene.traverse((child) => {
+        if (!child.isMesh) return;
+
+        const clusterMap = persistentEdgeLines.get(child);
+        if (!clusterMap) return;
+
+        // clusterMap is a normal Map → iterable
+        for (const [clusterIndex, line] of clusterMap) {
+            if (line?.material?.resolution) {
+                line.material.resolution.set(w, h);
+            }
+        }
+    });
+}
+
+
 window.addEventListener("resize", () => {
     const aspect = window.innerWidth / window.innerHeight;
 
@@ -631,6 +652,8 @@ window.addEventListener("resize", () => {
     orthoCamera.updateProjectionMatrix();
 
     renderer.setSize(window.innerWidth, window.innerHeight);
+
+    updateAllLineResolutions();
 });
 
 

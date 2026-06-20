@@ -104,6 +104,7 @@ const opacityInput = document.getElementById("faceOpacity");
 
 const edgeColorInput = document.getElementById("edgeColor");
 const edgeWidthInput = document.getElementById("edgeWidth");
+const edgeDashScaleInput = document.getElementById("edgeDashScale");
 const edgeDashedInput = document.getElementById("edgeDashed");
 
 const colorPanel = document.getElementById("colorPanel");
@@ -235,7 +236,9 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, style) {
     const mat = new LineMaterial({
         color: style.color.getHex(),
         linewidth: style.width,
-        dashed: style.dashed
+        dashed: style.dashed,
+        dashSize: 1 * style.dashScale,
+        gapSize: 1 * style.dashScale
     });
 
     mat.resolution.set(window.innerWidth, window.innerHeight);
@@ -328,7 +331,7 @@ function paintEdgeStyle(mesh, cluster, style, recordHistory = true) {
     const prev = meshStyles.get(clusterIndex) || {
         color: new THREE.Color(0x000000),
         width: 1,
-        dashed: false
+        dashed: false,
     };
 
     if (recordHistory) {
@@ -339,12 +342,14 @@ function paintEdgeStyle(mesh, cluster, style, recordHistory = true) {
             previous: {
                 color: prev.color.clone(),
                 width: prev.width,
-                dashed: prev.dashed
+                dashed: prev.dashed,
+                dashScale: prev.dashScale ?? 1
             },
             next: {
                 color: style.color.clone(),
                 width: style.width,
-                dashed: style.dashed
+                dashed: style.dashed,
+                dashScale: style.dashScale
             }
         });
         redoStack.length = 0;
@@ -353,7 +358,8 @@ function paintEdgeStyle(mesh, cluster, style, recordHistory = true) {
     meshStyles.set(clusterIndex, {
         color: style.color.clone(),
         width: style.width,
-        dashed: style.dashed
+        dashed: style.dashed,
+        dashScale: style.dashScale
     });
 
     updatePersistentEdgeLinesForCluster(mesh, cluster, style);
@@ -389,7 +395,8 @@ function highlightFace(hit) {
     const style = {
         color: new THREE.Color(edgeColorInput.value),
         width: parseFloat(edgeWidthInput.value),
-        dashed: edgeDashedInput.checked
+        dashed: edgeDashedInput.checked,
+        dashScale: parseFloat(edgeDashScaleInput.value)
     };
 
     if (!pickMode) {
@@ -521,6 +528,7 @@ function loadEdgeStyleIntoUI(mesh, cluster) {
 
     edgeColorInput.value = "#" + style.color.getHexString();
     edgeWidthInput.value = style.width;
+    edgeDashScaleInput.value = style.dashScale ?? 1;
     edgeDashedInput.checked = style.dashed;
 }
 
@@ -547,7 +555,8 @@ function applyUIEdgeStyle() {
     const style = {
         color: new THREE.Color(edgeColorInput.value),
         width: parseFloat(edgeWidthInput.value),
-        dashed: edgeDashedInput.checked
+        dashed: edgeDashedInput.checked,
+        dashScale: parseFloat(edgeDashScaleInput.value)
     };
 
     paintEdgeStyle(currentSelectedMesh, currentSelectedCluster, style);
@@ -555,6 +564,7 @@ function applyUIEdgeStyle() {
 
 edgeColorInput.addEventListener("input", applyUIEdgeStyle);
 edgeWidthInput.addEventListener("input", applyUIEdgeStyle);
+edgeDashScaleInput.addEventListener("input", applyUIEdgeStyle);
 edgeDashedInput.addEventListener("change", applyUIEdgeStyle);
 
 if (colorPanel) {

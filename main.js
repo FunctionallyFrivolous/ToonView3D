@@ -70,7 +70,7 @@ scene.add(dir);
 
 const defaultFaceMaterial = new THREE.MeshStandardMaterial({
     color: 0xcccccc,     // light gray default
-    opacity: 0.25,
+    opacity: 1,
     transparent: true,
     roughness: 0.6,
     metalness: 0.0,
@@ -107,6 +107,35 @@ loader.load("model.obj", (obj) => {
     //     color: 0xcccccc,
     //     flatShading: false,
     //   });
+
+    // child.material.vertexColors = true;
+    // const vertexCount = child.geometry.attributes.position.count;
+    // const colors = new Float32Array(vertexCount * 3);
+
+    // // default: light gray
+    // for (let i = 0; i < vertexCount; i++) {
+    // colors[i*3+0] = 0.8;
+    // colors[i*3+1] = 0.8;
+    // colors[i*3+2] = 0.8;
+    // }
+
+    // child.geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+
+    const vertexCount = child.geometry.attributes.position.count;
+    const colors = new Float32Array(vertexCount * 4);
+
+    // default: light gray, 25% opacity
+    for (let i = 0; i < vertexCount; i++) {
+    colors[i*4+0] = 0.8;   // R
+    colors[i*4+1] = 0.8;   // G
+    colors[i*4+2] = 0.8;   // B
+    colors[i*4+3] = 0.25;  // A
+    }
+
+    child.geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
+    child.material.vertexColors = true;
+    child.material.transparent = true;
+
 
     // child.userData.defaultColor = defaultFaceMaterial.color.clone();
     // child.userData.defaultOpacity = defaultFaceMaterial.opacity;
@@ -146,6 +175,32 @@ loader.load("model.obj", (obj) => {
 });
 
 // FUNCTIONS
+
+function paintCluster(mesh, cluster, color, opacity) {
+  const geo = mesh.geometry;
+  const index = geo.index;
+  const colors = geo.attributes.color;
+
+  for (const f of cluster) {
+    const i0 = index.getX(f*3 + 0);
+    const i1 = index.getX(f*3 + 1);
+    const i2 = index.getX(f*3 + 2);
+
+//     [i0, i1, i2].forEach(i => {
+//       colors.setXYZ(i, color.r, color.g, color.b);
+//     });
+//   }
+    [i0, i1, i2].forEach(i => {
+        colors.setX(i, color.r);
+        colors.setY(i, color.g);
+        colors.setZ(i, color.b);
+        colors.setW(i, opacity);
+        });
+    }
+
+  colors.needsUpdate = true;
+}
+
 
 function getBoundaryEdges(geometry, cluster) {
   const index = geometry.index;
@@ -287,13 +342,16 @@ function highlightFace(hit) {
   const cluster = clusters.find(c => c.includes(faceIndex));
   if (!cluster) return;
 
-  // Remove previous highlight
-  if (highlightMesh) {
-    scene.remove(highlightMesh);
-    highlightMesh.geometry.dispose();
-    highlightMesh.material.dispose();
-    highlightMesh = null;
-  }
+  paintCluster(hit.object, cluster, new THREE.Color(0xff0000), 0.5);
+
+
+//   // Remove previous highlight
+//   if (highlightMesh) {
+//     scene.remove(highlightMesh);
+//     highlightMesh.geometry.dispose();
+//     highlightMesh.material.dispose();
+//     highlightMesh = null;
+//   }
 
   const geometry = hit.object.geometry;
   const index = geometry.index;
@@ -318,22 +376,22 @@ function highlightFace(hit) {
     vCount += 3;
   }
 
-  const highlightGeo = new THREE.BufferGeometry();
-  highlightGeo.setFromPoints(verts);
-  highlightGeo.setIndex(inds);
-  highlightGeo.computeVertexNormals();
+//   const highlightGeo = new THREE.BufferGeometry();
+//   highlightGeo.setFromPoints(verts);
+//   highlightGeo.setIndex(inds);
+//   highlightGeo.computeVertexNormals();
 
-  const highlightMat = new THREE.MeshBasicMaterial({
-    color: 0xff0000, //0x8B0000,
-    side: THREE.DoubleSide,
-    transparent: true,
-    opacity: 0.25
-  });
+//   const highlightMat = new THREE.MeshBasicMaterial({
+//     color: 0xff0000, //0x8B0000,
+//     side: THREE.DoubleSide,
+//     transparent: true,
+//     opacity: 0.25
+//   });
 
-  highlightMesh = new THREE.Mesh(highlightGeo, highlightMat);
-  highlightMesh.layers.set(HIGHLIGHT_LAYER);
-  scene.add(highlightMesh);
-  highlightMesh.raycast = () => {};
+//   highlightMesh = new THREE.Mesh(highlightGeo, highlightMat);
+//   highlightMesh.layers.set(HIGHLIGHT_LAYER);
+//   scene.add(highlightMesh);
+//   highlightMesh.raycast = () => {};
 
   if (boundaryEdges) {
   scene.remove(boundaryEdges);

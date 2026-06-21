@@ -20,3 +20,6 @@ let downY = 0;
 const orthoSize = 4;
 
 const edgeStyles = new WeakMap();
+
+let currentModel = null;
+let currentEdgeLayers = [];

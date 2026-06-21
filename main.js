@@ -1,3 +1,16 @@
+// TO DO:
+    // Open models from local files
+    // Output/Export high res render
+        // Smooth geometry. Crisp lines.
+        // Render on button press. Show rendered image below main canvas
+        // Export SVG?
+    // Paint all faces upon initial load (eliminate weird artifacts in the default state that are not present in painted state...)
+    // Generate axis line?
+    // Snap to ortho views with keys (front/side/top)?
+    // Add back a pick-mode button to UI (for mobile)
+    // Multi face select
+    // Select entier mesh
+
 // ------------------------------------------------------------
 // Imports
 // ------------------------------------------------------------
@@ -10,7 +23,6 @@ import { mergeVertices } from "https://esm.sh/three@0.164.0/examples/jsm/utils/B
 import { LineMaterial } from "https://esm.sh/three@0.164.0/examples/jsm/lines/LineMaterial.js";
 import { LineSegments2 } from "https://esm.sh/three@0.164.0/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "https://esm.sh/three@0.164.0/examples/jsm/lines/LineSegmentsGeometry.js";
-
 
 // ------------------------------------------------------------
 // Scene setup
@@ -117,7 +129,11 @@ const colorPanel = document.getElementById("colorPanel");
 
 const loader = new OBJLoader();
 
-loader.load("model.obj", (obj) => {
+loader.load("GDT_Refs.obj", (obj) => {
+    initializeModel(obj)
+});
+
+function initializeModel(obj) {
     obj.traverse((child) => {
         if (child.isMesh) {
             child.geometry.deleteAttribute("normal");
@@ -138,7 +154,7 @@ loader.load("model.obj", (obj) => {
                 colors[i * 4 + 0] = 0;
                 colors[i * 4 + 1] = 0;
                 colors[i * 4 + 2] = 0;
-                colors[i * 4 + 3] = 0.2;
+                colors[i * 4 + 3] = 0.1;
             }
 
             child.geometry.setAttribute(
@@ -177,8 +193,8 @@ loader.load("model.obj", (obj) => {
     });
 
     scene.add(obj);
-});
-
+    currentModel = obj;
+}
 
 // ------------------------------------------------------------
 // Boundary-only edge extraction (correct logic)
@@ -223,7 +239,6 @@ function getBoundaryEdges(geometry, cluster) {
             boundaryPositions.push(p2.x, p2.y, p2.z);
         }
     }
-
     return new THREE.Float32BufferAttribute(boundaryPositions, 3);
 }
 
@@ -259,7 +274,7 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, style) {
 
     const mat = new LineMaterial({
         color: style.color.getHex(),
-        linewidth: style.width,
+        linewidth: style.width * window.devicePixelRatio,
         dashed: style.dashed,
         dashSize: 1 * style.dashScale,
         gapSize: 1 * style.dashScale
@@ -283,6 +298,7 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, style) {
 
     scene.add(line);
     meshLines.set(clusterIndex, line);
+    currentEdgeLayers.push(line); 
 }
 
 
@@ -811,6 +827,108 @@ function toggleCameraMode() {
     controls.object = activeCamera;
     controls.update();
 }
+
+// ------------------------------------------------------------
+// OBJ File Loading
+// ------------------------------------------------------------
+
+document.getElementById("fileInput").addEventListener("change", async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const text = await file.text(); // read OBJ as string
+    // loadOBJFromString(text, file.name);
+    handleOBJLoad(text, file.name);
+});
+
+// // Trigger file dialog from a button or menu
+// window.openOBJFileDialog = function() {
+//     fileInput.click();
+// };
+
+
+
+// // Handle file selection
+// fileInput.addEventListener("change", async (event) => {
+//     const file = event.target.files[0];
+//     if (!file) return;
+
+//     const text = await file.text();
+//     // loadOBJFromString(text, file.name);
+//     handleOBJLoad(text, file.name);
+// });
+
+// Drag & drop support
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", async (e) => {
+    e.preventDefault();
+
+    const file = e.dataTransfer.files[0];
+    if (!file || !file.name.toLowerCase().endsWith(".obj")) return;
+
+    const text = await file.text();
+    // loadOBJFromString(text, file.name);
+    handleOBJLoad(text, file.name);
+});
+
+function handleOBJLoad(objText, name) {
+
+    // If a model is already loaded, ask user what to do
+    if (currentModel) {
+        const replace = confirm(
+            "A model is already loaded.\n\nDo you want to remove it before loading the new one?"
+        );
+
+        if (replace) {
+            // Remove old model from scene
+            scene.remove(currentModel);
+            currentModel.traverse(obj => {
+                if (obj.geometry) obj.geometry.dispose();
+                if (obj.material) {
+                    if (Array.isArray(obj.material)) {
+                        obj.material.forEach(m => m.dispose());
+                    } else {
+                        obj.material.dispose();
+                    }
+                }
+            });
+            currentModel = null;
+
+            currentEdgeLayers.forEach(layer => {
+                scene.remove(layer);
+                if (layer.geometry) layer.geometry.dispose();
+                if (layer.material) layer.material.dispose();
+            });
+            currentEdgeLayers = [];
+        }
+    }
+
+    // Load new OBJ
+    loadOBJFromString(objText, name);
+    }
+
+// Core OBJ loading logic
+function loadOBJFromString(objText, name = "model.obj") {
+    const object = loader.parse(objText);
+    object.name = name;
+
+    // // Normalize geometry
+    // object.traverse((child) => {
+    //     if (child.isMesh) {
+    //         child.geometry.computeVertexNormals();
+    //     }
+    // });
+
+    // Add to scene
+    scene.add(object);
+
+    // Hand off to your existing pipeline
+    if (typeof initializeModel === "function") {
+        initializeModel(object);
+    }
+    // console.log(currentModel)
+}
+
 
 
 // ------------------------------------------------------------

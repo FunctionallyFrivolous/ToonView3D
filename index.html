@@ -30,13 +30,14 @@
         <input type="color" id="edgeColor" value="#000000"><br><br>
 
         <label>Edge Width:</label><br>
-        <input type="range" id="edgeWidth" min="0" max="5" step="1" value="1"><br><br>
+        <input type="range" id="edgeWidth" min="0" max="5" step="0.5" value="1"><br><br>
 
         <label><input type="checkbox" id="edgeDashed"> Dashed:</label>
         <br>
         <input id="edgeDashScale" type="range" min="0.05" max="0.25" step="0.01" value="0.1">
+        <br>
 
-
+      <input id="fileInput" type="file" accept=".obj" style="display:none"/>
 
     </div>
 
@@ -44,7 +45,6 @@
     
     <script type="module" src="./functions.js"></script>
     <script src="handlers.js"></script>
-    
     <script type="module" src="./main.js"></script>
     
     <script src="globals.js"></script>

@@ -67,7 +67,8 @@ const defaultFaceMaterial = new THREE.MeshStandardMaterial({
     roughness: 0.6,
     metalness: 0.0,
     side: THREE.DoubleSide,
-    depthWrite: false
+    depthWrite: true,
+    depthTest: true
 });
 
 
@@ -243,7 +244,7 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, style) {
 
     mat.resolution.set(window.innerWidth, window.innerHeight);
     mat.depthTest = true;
-    // mat.depthWrite = false;
+    mat.depthWrite = true;
 
     mat.polygonOffset = true;
     mat.polygonOffsetFactor = -2;
@@ -428,7 +429,7 @@ function highlightFace(hit) {
 
         boundaryEdges.applyMatrix4(hit.object.matrixWorld);
         boundaryEdges.material.depthTest = false;
-        boundaryEdges.material.depthWrite = false;
+        boundaryEdges.material.depthWrite = true;
         boundaryEdges.renderOrder = 999;
 
         boundaryEdges.layers.set(HIGHLIGHT_LAYER);

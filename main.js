@@ -138,7 +138,7 @@ loader.load("model.obj", (obj) => {
                 colors[i * 4 + 0] = 0;
                 colors[i * 4 + 1] = 0;
                 colors[i * 4 + 2] = 0;
-                colors[i * 4 + 3] = 0.1;
+                colors[i * 4 + 3] = 0.2;
             }
 
             child.geometry.setAttribute(
@@ -147,9 +147,32 @@ loader.load("model.obj", (obj) => {
             );
             child.material.vertexColors = true;
             child.material.transparent = true;
+            child.material.depthWrite = true,
+            child.material.depthTest = false
 
             edgeStyles.set(child, new Map());
             persistentEdgeLines.set(child, new Map());
+
+            const defaultStyle = {
+                color: new THREE.Color("#000000"),
+                width: 1,
+                dashed: false,
+                dashScale: 1
+            };
+
+            const meshStyles = edgeStyles.get(child);
+            const meshLines = persistentEdgeLines.get(child);
+
+            child.userData.surfaceClusters.forEach((cluster, clusterIndex) => {
+                meshStyles.set(clusterIndex, {
+                    color: defaultStyle.color.clone(),
+                    width: defaultStyle.width,
+                    dashed: defaultStyle.dashed,
+                    dashScale: defaultStyle.dashScale
+                });
+
+                updatePersistentEdgeLinesForCluster(child, cluster, defaultStyle);
+            });
         }
     });
 

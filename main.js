@@ -1,5 +1,4 @@
 // TO DO:
-    // Open models from local files
     // Output/Export high res render
         // Smooth geometry. Crisp lines.
         // Render on button press. Show rendered image below main canvas
@@ -9,7 +8,8 @@
     // Snap to ortho views with keys (front/side/top)?
     // Add back a pick-mode button to UI (for mobile)
     // Multi face select
-    // Select entier mesh
+    // Select entire mesh
+    // Select individual edges?
 
 // ------------------------------------------------------------
 // Imports
@@ -57,7 +57,9 @@ let activeCamera = orthoCamera;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
-document.body.appendChild(renderer.domElement);
+// document.body.appendChild(renderer.domElement);
+document.getElementById("viewerContainer").appendChild(renderer.domElement);
+
 
 const controls = new OrbitControls(activeCamera, renderer.domElement);
 controls.enableDamping = true;
@@ -636,6 +638,7 @@ window.addEventListener("pointermove", (e) => {
 window.addEventListener("pointerup", (e) => {
     pointerDown = false;
     if (moved) return;
+    if (e.target !== renderer.domElement) return; // ignore clicks outside of canvas
 
     mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
@@ -651,6 +654,7 @@ window.addEventListener("pointerup", (e) => {
     } else {
         deselectAllFaces();
     }
+
 });
 
 window.addEventListener("keydown", (e) => {
@@ -832,29 +836,11 @@ function toggleCameraMode() {
 // OBJ File Loading
 // ------------------------------------------------------------
 
-document.getElementById("fileInput").addEventListener("change", async (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
-
-    const text = await file.text(); // read OBJ as string
-    // loadOBJFromString(text, file.name);
-    handleOBJLoad(text, file.name);
-});
-
-// // Trigger file dialog from a button or menu
-// window.openOBJFileDialog = function() {
-//     fileInput.click();
-// };
-
-
-
-// // Handle file selection
-// fileInput.addEventListener("change", async (event) => {
+// document.getElementById("fileInput").addEventListener("change", async (event) => {
 //     const file = event.target.files[0];
 //     if (!file) return;
 
-//     const text = await file.text();
-//     // loadOBJFromString(text, file.name);
+//     const text = await file.text(); // read OBJ as string
 //     handleOBJLoad(text, file.name);
 // });
 
@@ -867,7 +853,6 @@ window.addEventListener("drop", async (e) => {
     if (!file || !file.name.toLowerCase().endsWith(".obj")) return;
 
     const text = await file.text();
-    // loadOBJFromString(text, file.name);
     handleOBJLoad(text, file.name);
 });
 
@@ -912,12 +897,12 @@ function loadOBJFromString(objText, name = "model.obj") {
     const object = loader.parse(objText);
     object.name = name;
 
-    // // Normalize geometry
-    // object.traverse((child) => {
-    //     if (child.isMesh) {
-    //         child.geometry.computeVertexNormals();
-    //     }
-    // });
+    // Normalize geometry
+    object.traverse((child) => {
+        if (child.isMesh) {
+            child.geometry.computeVertexNormals();
+        }
+    });
 
     // Add to scene
     scene.add(object);
@@ -929,6 +914,50 @@ function loadOBJFromString(objText, name = "model.obj") {
     // console.log(currentModel)
 }
 
+//
+// ------------------------------------------------------------
+// High‑Resolution Snapshot Renderer
+// ------------------------------------------------------------
+
+const snapshotRenderer = new THREE.WebGLRenderer({ antialias: true });
+snapshotRenderer.setPixelRatio(1); // we control resolution manually
+
+// How many times bigger than the live view?
+const SNAPSHOT_SCALE = 2;
+
+// Render button
+document.getElementById("renderButton").addEventListener("click", () => {
+    if (!currentModel) return;
+
+    // Compute target resolution
+    const w = renderer.domElement.width * SNAPSHOT_SCALE;
+    const h = renderer.domElement.height * SNAPSHOT_SCALE;
+
+    snapshotRenderer.setSize(w, h, false);
+
+    // Render scene using the active camera
+    snapshotRenderer.render(scene, activeCamera);
+
+    // Convert to PNG
+    const dataURL = snapshotRenderer.domElement.toDataURL("image/png");
+
+    // Display in preview box
+    const img = document.getElementById("renderOutput");
+    img.src = dataURL;
+
+    // Store for saving
+    window.lastRenderDataURL = dataURL;
+});
+
+// Save button
+document.getElementById("saveRenderButton").addEventListener("click", () => {
+    if (!window.lastRenderDataURL) return;
+
+    const a = document.createElement("a");
+    a.href = window.lastRenderDataURL;
+    a.download = "render.png";
+    a.click();
+});
 
 
 // ------------------------------------------------------------

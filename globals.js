@@ -6,6 +6,10 @@ const HIGHLIGHT_LAYER = 2;
 let currentSelectedMesh = null;
 let currentSelectedCluster = null;
 
+let currentSelectedEdge = null;      // { mesh, clusterIndex, edgeIndex }
+let edgeHighlightLine = null;        // LineSegments2 for selected edge
+
+
 const undoStack = [];
 const redoStack = [];
 

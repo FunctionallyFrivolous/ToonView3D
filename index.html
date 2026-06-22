@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <title>OBJ Viewer</title>
     <style>
-      body { margin: 0; overflow: hidden; }
+      body { margin: 0; overflow-x: hidden; overflow-y: auto; }
     </style>
   </head>
     <div id="colorPanel" style="
@@ -41,7 +41,45 @@
 
     </div>
 
+
   <body>
+
+    <!-- LIVE VIEWER CONTAINER -->
+    <div id="viewerContainer" style="
+        width: 100%;
+        height: calc(100vh - 60px); /* leave room for render preview */
+        position: relative; 
+        overflow: hidden;
+    ">
+        <!-- Three.js will inject its canvas here -->
+    </div>
+
+    <div>
+    <!-- RENDER PREVIEW CONTAINER -->
+    <div id="renderPanel" style="
+        width: 100%; 
+        height: 100%;
+        background: #f8f8f8;
+        border-top: 1px solid #ccc;
+        padding: 10px;
+        box-sizing: border-box;
+        position: relative;
+        overflow: hidden;
+    ">
+        <button id="renderButton">Render High‑Res</button>
+        <button id="saveRenderButton">Save Image</button>
+
+        <div id="renderOutputContainer" style="
+            margin-top: 10px;
+            width: 100%;
+            height: 100vh;
+            overflow: auto;
+            border: 1px solid #ccc;
+            background: white;
+        ">
+            <img id="renderOutput" style="width: 100%; display: block;" />
+        </div>
+    </div>
     
     <script type="module" src="./functions.js"></script>
     <script src="handlers.js"></script>

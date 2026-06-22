@@ -131,7 +131,7 @@ const colorPanel = document.getElementById("colorPanel");
 
 const loader = new OBJLoader();
 
-loader.load("GDT_Refs.obj", (obj) => {
+loader.load("model.obj", (obj) => {
     initializeModel(obj)
 });
 
@@ -957,6 +957,402 @@ document.getElementById("saveRenderButton").addEventListener("click", () => {
     a.href = window.lastRenderDataURL;
     a.download = "render.png";
     a.click();
+});
+
+
+//
+function exportSVG() {
+    if (!currentModel) return;
+
+    const width  = renderer.domElement.width;
+    const height = renderer.domElement.height;
+
+    const svgPaths = [];
+    const meshes = [];
+    currentModel.traverse(o => { if (o.isMesh) meshes.push(o); });
+
+    // Global dedupe: avoid emitting identical cluster paths twice
+    const emittedClusterSignatures = new Set();
+
+    for (const mesh of meshes) {
+        const clusters = mesh.userData.surfaceClusters;
+        if (!clusters) continue;
+
+        const geo    = mesh.geometry;
+        const pos    = geo.attributes.position;
+        const index  = geo.index;
+        const colors = geo.attributes.color;
+
+        clusters.forEach((cluster, clusterIndex) => {
+            if (!cluster || cluster.length === 0) return;
+
+            // --- 1. Face color (linear → sRGB, Inkscape‑safe) ---
+            const f0 = cluster[0];
+            const i0 = index.getX(f0 * 3 + 0);
+
+            const lr = colors.getX(i0);
+            const lg = colors.getY(i0);
+            const lb = colors.getZ(i0);
+            const a  = colors.getW(i0);
+
+            const srgb = new THREE.Color(lr, lg, lb).convertLinearToSRGB();
+            const fillColor   = `rgb(${Math.round(srgb.r * 255)},${Math.round(srgb.g * 255)},${Math.round(srgb.b * 255)})`;
+            const fillOpacity = a;
+
+            // --- 2. Stroke style (also convert to sRGB) ---
+            const style = edgeStyles.get(mesh)?.get(clusterIndex);
+            if (!style) return;
+
+            const strokeColor = style.color.clone().convertLinearToSRGB().getStyle();
+
+            // --- 3. Boundary edges for this cluster ---
+            const edgeAttr = getBoundaryEdges(geo, cluster);
+            if (!edgeAttr || edgeAttr.count === 0) return;
+
+            const segments = [];
+            for (let i = 0; i < edgeAttr.count; i += 2) {
+                const v1 = new THREE.Vector3(
+                    edgeAttr.array[i*3+0],
+                    edgeAttr.array[i*3+1],
+                    edgeAttr.array[i*3+2]
+                ).applyMatrix4(mesh.matrixWorld);
+
+                const v2 = new THREE.Vector3(
+                    edgeAttr.array[(i+1)*3+0],
+                    edgeAttr.array[(i+1)*3+1],
+                    edgeAttr.array[(i+1)*3+2]
+                ).applyMatrix4(mesh.matrixWorld);
+
+                segments.push([v1, v2]);
+            }
+
+            // --- 4. Build ordered loops from segments ---
+            let loops = buildOrderedLoops(segments);
+            if (!loops || loops.length === 0) return;
+
+            // --- 5. Deduplicate loops by geometry (order‑independent) ---
+            const seenLoopSigs = new Set();
+            const uniqueLoops  = [];
+
+            for (const loop of loops) {
+                const sig = loopSignature(loop);
+                if (!seenLoopSigs.has(sig)) {
+                    seenLoopSigs.add(sig);
+                    uniqueLoops.push(loop);
+                }
+            }
+            loops = uniqueLoops;
+            if (loops.length === 0) return;
+
+            // --- 6. Build combined path data (outer + holes) ---
+            let d = "";
+            const clusterGeomSigParts = [];
+
+            for (const loop of loops) {
+                const projected = loop.map(v => {
+                    const p = v.clone().project(activeCamera);
+                    return [
+                        (p.x * 0.5 + 0.5) * width,
+                        (1 - (p.y * 0.5 + 0.5)) * height
+                    ];
+                });
+
+                // For dedupe: geometry signature in 2D
+                clusterGeomSigParts.push(
+                    projected
+                        .map(p => `${p[0].toFixed(2)},${p[1].toFixed(2)}`)
+                        .sort()
+                        .join("|")
+                );
+
+                d += projected.map((p, i) => {
+                    const cmd = (i === 0) ? "M" : "L";
+                    return `${cmd} ${p[0]},${p[1]}`;
+                }).join(" ") + " Z ";
+                // d += buildSmoothPath2D(projected, true) + " ";
+                // d += buildHybridSmoothPath2D(projected, true) + " ";
+                // d += buildCADSmoothPath2D(projected, true) + " ";
+
+            }
+
+            // --- 7. Cluster‑level dedupe (handles any remaining weirdness) ---
+            const clusterSig = [
+                fillColor,
+                fillOpacity.toFixed(3),
+                strokeColor,
+                style.width.toFixed(3),
+                style.dashed ? style.dashScale.toFixed(3) : "solid",
+                clusterGeomSigParts.sort().join("||")
+            ].join("::");
+
+            if (emittedClusterSignatures.has(clusterSig)) return;
+            emittedClusterSignatures.add(clusterSig);
+
+            // --- 8. Emit ONE path for this cluster (outer + holes) ---
+            svgPaths.push(`
+                <path d="${d}"
+                      fill="${fillColor}"
+                      fill-opacity="${fillOpacity}"
+                      stroke="${strokeColor}"
+                      stroke-width="${style.width}"
+                      ${style.dashed ? `stroke-dasharray="${style.dashScale * 70}"` : ""}
+                      fill-rule="evenodd"
+                />
+            `);
+        });
+    }
+
+    return `
+        <svg xmlns="http://www.w3.org/2000/svg"
+             width="${width}" height="${height}"
+             viewBox="0 0 ${width} ${height}">
+            ${svgPaths.join("\n")}
+        </svg>
+    `;
+}
+
+function buildCADSmoothPath2D(points, closed = true, angleThreshold = Math.PI * 0.98) {
+    const n = points.length;
+    if (n < 2) return "";
+
+    const get = i => points[(i + n) % n];
+
+    // Step 1: classify each vertex
+    const isStraight = [];
+    for (let i = 0; i < n; i++) {
+        const p0 = get(i - 1);
+        const p1 = get(i);
+        const p2 = get(i + 1);
+
+        const ang = angleBetween(p0, p1, p2);
+        isStraight[i] = (ang > angleThreshold);
+    }
+
+    // Step 2: build path
+    let d = `M ${points[0][0]},${points[0][1]}`;
+
+    let i = 0;
+    while (i < n) {
+        if (isStraight[i]) {
+            // Straight segment
+            const p2 = get(i + 1);
+            d += ` L ${p2[0]},${p2[1]}`;
+            i++;
+        } else {
+            // Curved run
+            const run = [];
+            let j = i;
+            while (j < n && !isStraight[j]) {
+                run.push(get(j));
+                j++;
+            }
+            run.push(get(j)); // include endpoint
+
+            // Fit Bezier chain to this run
+            d += buildBezierRun(run);
+
+            i = j;
+        }
+    }
+
+    if (closed) d += " Z";
+    return d;
+}
+
+function buildBezierRun(run) {
+    if (run.length < 3) {
+        // Not enough points to smooth
+        const p = run[run.length - 1];
+        return ` L ${p[0]},${p[1]}`;
+    }
+
+    let seg = "";
+
+    for (let k = 0; k < run.length - 2; k++) {
+        const p0 = run[k];
+        const p1 = run[k + 1];
+        const p2 = run[k + 2];
+
+        // Simple 3‑point Bezier fit
+        const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+        const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+        const c2x = p1[0] + (p2[0] - p0[0]) * 5 / 6;
+        const c2y = p1[1] + (p2[1] - p0[1]) * 5 / 6;
+
+        seg += ` C ${c1x},${c1y} ${c2x},${c2y} ${p2[0]},${p2[1]}`;
+    }
+
+    return seg;
+}
+
+function angleBetween(p0, p1, p2) {
+    const v1 = [p0[0] - p1[0], p0[1] - p1[1]];
+    const v2 = [p2[0] - p1[0], p2[1] - p1[1]];
+
+    const dot = v1[0]*v2[0] + v1[1]*v2[1];
+    const m1 = Math.hypot(v1[0], v1[1]);
+    const m2 = Math.hypot(v2[0], v2[1]);
+
+    if (m1 === 0 || m2 === 0) return Math.PI;
+    return Math.acos(Math.min(Math.max(dot / (m1*m2), -1), 1));
+}
+
+
+function buildHybridSmoothPath2D(points, closed = true, angleThreshold = Math.PI * 0.95) {
+    // angleThreshold ≈ 171° → treat as straight
+
+    const n = points.length;
+    if (n < 2) return "";
+
+    const get = i => points[(i + n) % n];
+
+    let d = `M ${points[0][0]},${points[0][1]}`;
+
+    for (let i = 0; i < n; i++) {
+        const p0 = get(i - 1);
+        const p1 = get(i);
+        const p2 = get(i + 1);
+        const p3 = get(i + 2);
+
+        const ang = angleBetween(p0, p1, p2);
+
+        if (ang > angleThreshold) {
+            // Nearly straight → use a line
+            d += ` L ${p2[0]},${p2[1]}`;
+        } else {
+            // Curved → use Catmull–Rom → Bezier
+            const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+            const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+            const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+            const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+
+            d += ` C ${c1x},${c1y} ${c2x},${c2y} ${p2[0]},${p2[1]}`;
+        }
+    }
+
+    if (closed) d += " Z";
+    return d;
+}
+
+function buildSmoothPath2D(points, closed = true) {
+    if (points.length < 2) return "";
+
+    const n = points.length;
+    const get = i => points[(i + n) % n];
+
+    let d = `M ${points[0][0]},${points[0][1]}`;
+
+    for (let i = 0; i < n; i++) {
+        const p0 = get(i - 1);
+        const p1 = get(i);
+        const p2 = get(i + 1);
+        const p3 = get(i + 2);
+
+        // Catmull–Rom to cubic Bezier
+        const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+        const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+        const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+        const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+
+        d += ` C ${c1x},${c1y} ${c2x},${c2y} ${p2[0]},${p2[1]}`;
+    }
+
+    if (closed) d += " Z";
+    return d;
+}
+
+function buildOrderedLoops(segments) {
+    const adj = new Map();
+    const pointMap = new Map();
+
+    function key(v) {
+        return `${v.x.toFixed(6)},${v.y.toFixed(6)},${v.z.toFixed(6)}`;
+    }
+
+    for (const [a, b] of segments) {
+        const ka = key(a), kb = key(b);
+
+        if (!adj.has(ka)) adj.set(ka, []);
+        if (!adj.has(kb)) adj.set(kb, []);
+
+        adj.get(ka).push(kb);
+        adj.get(kb).push(ka);
+
+        pointMap.set(ka, a);
+        pointMap.set(kb, b);
+    }
+
+    const loops = [];
+    const visitedEdges = new Set();
+
+    function edgeKey(a, b) { return `${a}|${b}`; }
+
+    function walkLoop(startKey) {
+        const loop = [];
+        let current = startKey;
+
+        while (true) {
+            const v = pointMap.get(current);
+            if (!v) break;
+            loop.push(v);
+
+            const neighbors = adj.get(current);
+            if (!neighbors || neighbors.length === 0) break;
+
+            let next = null;
+            for (const nb of neighbors) {
+                const ek = edgeKey(current, nb);
+                if (!visitedEdges.has(ek)) {
+                    visitedEdges.add(ek);
+                    visitedEdges.add(edgeKey(nb, current));
+                    next = nb;
+                    break;
+                }
+            }
+
+            if (!next) break;
+            current = next;
+            if (current === startKey) break;
+        }
+
+        return loop;
+    }
+
+    for (const [a, neighbors] of adj.entries()) {
+        for (const b of neighbors) {
+            const ek = edgeKey(a, b);
+            if (!visitedEdges.has(ek)) {
+                visitedEdges.add(ek);
+                visitedEdges.add(edgeKey(b, a));
+                const loop = walkLoop(a);
+                if (loop.length > 2) loops.push(loop);
+            }
+        }
+    }
+
+    return loops;
+}
+
+function loopSignature(loop) {
+    const pts = loop.map(v => `${v.x.toFixed(5)},${v.y.toFixed(5)},${v.z.toFixed(5)}`);
+    pts.sort();
+    return pts.join("|");
+}
+
+
+document.getElementById("saveSVGButton").addEventListener("click", () => {
+    const svg = exportSVG();
+    if (!svg) return;
+
+    const blob = new Blob([svg], { type: "image/svg+xml" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "modelSVG.svg";
+    a.click();
+
+    URL.revokeObjectURL(url);
 });
 
 

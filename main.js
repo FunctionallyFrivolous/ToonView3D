@@ -24,6 +24,10 @@ import { LineMaterial } from "https://esm.sh/three@0.164.0/examples/jsm/lines/Li
 import { LineSegments2 } from "https://esm.sh/three@0.164.0/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "https://esm.sh/three@0.164.0/examples/jsm/lines/LineSegmentsGeometry.js";
 
+import * as martinez from "https://esm.sh/martinez-polygon-clipping";
+
+
+
 // ------------------------------------------------------------
 // Scene setup
 // ------------------------------------------------------------
@@ -967,12 +971,34 @@ function exportSVG() {
     const width  = renderer.domElement.width;
     const height = renderer.domElement.height;
 
-    const svgPaths = [];
     const meshes = [];
     currentModel.traverse(o => { if (o.isMesh) meshes.push(o); });
 
-    // Global dedupe: avoid emitting identical cluster paths twice
-    const emittedClusterSignatures = new Set();
+    const svgPaths = [];
+
+    // ------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------
+
+    function projectToScreen(v) {
+        const p = v.clone().project(activeCamera);
+        return [
+            (p.x * 0.5 + 0.5) * width,
+            (1 - (p.y * 0.5 + 0.5)) * height
+        ];
+    }
+
+    function faceNormalCamSpace(a, b, c, mvMatrix) {
+        const v0 = a.clone().applyMatrix4(mvMatrix);
+        const v1 = b.clone().applyMatrix4(mvMatrix);
+        const v2 = c.clone().applyMatrix4(mvMatrix);
+
+        return v1.sub(v0).cross(v2.sub(v0)).normalize();
+    }
+
+    // ------------------------------------------------------------
+    // Main
+    // ------------------------------------------------------------
 
     for (const mesh of meshes) {
         const clusters = mesh.userData.surfaceClusters;
@@ -983,119 +1009,133 @@ function exportSVG() {
         const index  = geo.index;
         const colors = geo.attributes.color;
 
+        if (!index) continue;
+
+        const triCount = index.count / 3;
+
+        // Build adjacency: edge → [faceA, faceB]
+        const edgeMap = new Map();
+        function addEdge(a, b, f) {
+            const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+            if (!edgeMap.has(key)) edgeMap.set(key, []);
+            edgeMap.get(key).push(f);
+        }
+
+        for (let f = 0; f < triCount; f++) {
+            const i0 = index.getX(f*3+0);
+            const i1 = index.getX(f*3+1);
+            const i2 = index.getX(f*3+2);
+            addEdge(i0, i1, f);
+            addEdge(i1, i2, f);
+            addEdge(i2, i0, f);
+        }
+
+        // Precompute face normals in camera space
+        const mvMatrix = new THREE.Matrix4()
+            .multiplyMatrices(activeCamera.matrixWorldInverse, mesh.matrixWorld);
+
+        const faceNormals = [];
+        const faceCenters = [];
+
+        for (let f = 0; f < triCount; f++) {
+            const i0 = index.getX(f*3+0);
+            const i1 = index.getX(f*3+1);
+            const i2 = index.getX(f*3+2);
+
+            const v0 = new THREE.Vector3().fromBufferAttribute(pos, i0).applyMatrix4(mesh.matrixWorld);
+            const v1 = new THREE.Vector3().fromBufferAttribute(pos, i1).applyMatrix4(mesh.matrixWorld);
+            const v2 = new THREE.Vector3().fromBufferAttribute(pos, i2).applyMatrix4(mesh.matrixWorld);
+
+            const n = faceNormalCamSpace(
+                new THREE.Vector3().fromBufferAttribute(pos, i0),
+                new THREE.Vector3().fromBufferAttribute(pos, i1),
+                new THREE.Vector3().fromBufferAttribute(pos, i2),
+                mvMatrix
+            );
+
+            faceNormals[f] = n;
+
+            const c = v0.clone().add(v1).add(v2).multiplyScalar(1/3);
+            faceCenters[f] = c;
+        }
+
+        // Determine if face is front-facing
+        const faceFacing = faceNormals.map(n => n.z < 0);
+
+        // For each cluster, collect silhouette edges
         clusters.forEach((cluster, clusterIndex) => {
-            if (!cluster || cluster.length === 0) return;
+            const style = edgeStyles.get(mesh)?.get(clusterIndex);
+            if (!style) return;
 
-            // --- 1. Face color (linear → sRGB, Inkscape‑safe) ---
+            // Face color
             const f0 = cluster[0];
-            const i0 = index.getX(f0 * 3 + 0);
-
+            const i0 = index.getX(f0*3+0);
             const lr = colors.getX(i0);
             const lg = colors.getY(i0);
             const lb = colors.getZ(i0);
             const a  = colors.getW(i0);
 
             const srgb = new THREE.Color(lr, lg, lb).convertLinearToSRGB();
-            const fillColor   = `rgb(${Math.round(srgb.r * 255)},${Math.round(srgb.g * 255)},${Math.round(srgb.b * 255)})`;
+            const fillColor   = `rgb(${Math.round(srgb.r*255)},${Math.round(srgb.g*255)},${Math.round(srgb.b*255)})`;
             const fillOpacity = a;
 
-            // --- 2. Stroke style (also convert to sRGB) ---
-            const style = edgeStyles.get(mesh)?.get(clusterIndex);
-            if (!style) return;
+            const silhouetteSegments = [];
 
-            const strokeColor = style.color.clone().convertLinearToSRGB().getStyle();
+            for (const [key, faces] of edgeMap.entries()) {
+                const [s0, s1] = key.split("_").map(Number);
 
-            // --- 3. Boundary edges for this cluster ---
-            const edgeAttr = getBoundaryEdges(geo, cluster);
-            if (!edgeAttr || edgeAttr.count === 0) return;
+                const facesInCluster = faces.filter(f => cluster.includes(f));
+                if (facesInCluster.length === 0) continue;
 
-            const segments = [];
-            for (let i = 0; i < edgeAttr.count; i += 2) {
-                const v1 = new THREE.Vector3(
-                    edgeAttr.array[i*3+0],
-                    edgeAttr.array[i*3+1],
-                    edgeAttr.array[i*3+2]
-                ).applyMatrix4(mesh.matrixWorld);
+                let isSilhouette = false;
 
-                const v2 = new THREE.Vector3(
-                    edgeAttr.array[(i+1)*3+0],
-                    edgeAttr.array[(i+1)*3+1],
-                    edgeAttr.array[(i+1)*3+2]
-                ).applyMatrix4(mesh.matrixWorld);
+                if (faces.length === 1) {
+                    // True mesh boundary
+                    isSilhouette = true;
+                } else if (faces.length === 2) {
+                    const [fA, fB] = faces;
+                    const A = faceFacing[fA];
+                    const B = faceFacing[fB];
 
-                segments.push([v1, v2]);
-            }
+                    if (facesInCluster.length === 1) {
+                        // Edge between this cluster and some other cluster → feature edge
+                        isSilhouette = true;
+                    } else {
+                        // Both faces in this cluster → true silhouette only if facing differs
+                        if (A !== B) isSilhouette = true;
+                    }
+                }
 
-            // --- 4. Build ordered loops from segments ---
-            let loops = buildOrderedLoops(segments);
-            if (!loops || loops.length === 0) return;
-
-            // --- 5. Deduplicate loops by geometry (order‑independent) ---
-            const seenLoopSigs = new Set();
-            const uniqueLoops  = [];
-
-            for (const loop of loops) {
-                const sig = loopSignature(loop);
-                if (!seenLoopSigs.has(sig)) {
-                    seenLoopSigs.add(sig);
-                    uniqueLoops.push(loop);
+                if (isSilhouette) {
+                    const v1 = new THREE.Vector3().fromBufferAttribute(pos, s0).applyMatrix4(mesh.matrixWorld);
+                    const v2 = new THREE.Vector3().fromBufferAttribute(pos, s1).applyMatrix4(mesh.matrixWorld);
+                    silhouetteSegments.push([v1, v2]);
                 }
             }
-            loops = uniqueLoops;
-            if (loops.length === 0) return;
 
-            // --- 6. Build combined path data (outer + holes) ---
+
+            if (!silhouetteSegments.length) return;
+
+            // Build loops
+            const loops = buildOrderedLoops(silhouetteSegments);
+            if (!loops || !loops.length) return;
+
+            // Project loops
             let d = "";
-            const clusterGeomSigParts = [];
-
             for (const loop of loops) {
-                const projected = loop.map(v => {
-                    const p = v.clone().project(activeCamera);
-                    return [
-                        (p.x * 0.5 + 0.5) * width,
-                        (1 - (p.y * 0.5 + 0.5)) * height
-                    ];
-                });
-
-                // For dedupe: geometry signature in 2D
-                clusterGeomSigParts.push(
-                    projected
-                        .map(p => `${p[0].toFixed(2)},${p[1].toFixed(2)}`)
-                        .sort()
-                        .join("|")
-                );
-
-                d += projected.map((p, i) => {
-                    const cmd = (i === 0) ? "M" : "L";
-                    return `${cmd} ${p[0]},${p[1]}`;
-                }).join(" ") + " Z ";
-                // d += buildSmoothPath2D(projected, true) + " ";
-                // d += buildHybridSmoothPath2D(projected, true) + " ";
-                // d += buildCADSmoothPath2D(projected, true) + " ";
-
+                const pts = loop.map(v => projectToScreen(v));
+                d += pts.map((p,i) => (i===0 ? `M ${p[0]},${p[1]}` : `L ${p[0]},${p[1]}`)).join(" ");
+                d += " Z ";
             }
 
-            // --- 7. Cluster‑level dedupe (handles any remaining weirdness) ---
-            const clusterSig = [
-                fillColor,
-                fillOpacity.toFixed(3),
-                strokeColor,
-                style.width.toFixed(3),
-                style.dashed ? style.dashScale.toFixed(3) : "solid",
-                clusterGeomSigParts.sort().join("||")
-            ].join("::");
-
-            if (emittedClusterSignatures.has(clusterSig)) return;
-            emittedClusterSignatures.add(clusterSig);
-
-            // --- 8. Emit ONE path for this cluster (outer + holes) ---
+            // Emit path
             svgPaths.push(`
                 <path d="${d}"
                       fill="${fillColor}"
                       fill-opacity="${fillOpacity}"
-                      stroke="${strokeColor}"
+                      stroke="${style.color.getStyle()}"
                       stroke-width="${style.width}"
-                      ${style.dashed ? `stroke-dasharray="${style.dashScale * 70}"` : ""}
+                      ${style.dashed ? `stroke-dasharray="${style.dashScale*70}"` : ""}
                       fill-rule="evenodd"
                 />
             `);
@@ -1109,156 +1149,6 @@ function exportSVG() {
             ${svgPaths.join("\n")}
         </svg>
     `;
-}
-
-function buildCADSmoothPath2D(points, closed = true, angleThreshold = Math.PI * 0.98) {
-    const n = points.length;
-    if (n < 2) return "";
-
-    const get = i => points[(i + n) % n];
-
-    // Step 1: classify each vertex
-    const isStraight = [];
-    for (let i = 0; i < n; i++) {
-        const p0 = get(i - 1);
-        const p1 = get(i);
-        const p2 = get(i + 1);
-
-        const ang = angleBetween(p0, p1, p2);
-        isStraight[i] = (ang > angleThreshold);
-    }
-
-    // Step 2: build path
-    let d = `M ${points[0][0]},${points[0][1]}`;
-
-    let i = 0;
-    while (i < n) {
-        if (isStraight[i]) {
-            // Straight segment
-            const p2 = get(i + 1);
-            d += ` L ${p2[0]},${p2[1]}`;
-            i++;
-        } else {
-            // Curved run
-            const run = [];
-            let j = i;
-            while (j < n && !isStraight[j]) {
-                run.push(get(j));
-                j++;
-            }
-            run.push(get(j)); // include endpoint
-
-            // Fit Bezier chain to this run
-            d += buildBezierRun(run);
-
-            i = j;
-        }
-    }
-
-    if (closed) d += " Z";
-    return d;
-}
-
-function buildBezierRun(run) {
-    if (run.length < 3) {
-        // Not enough points to smooth
-        const p = run[run.length - 1];
-        return ` L ${p[0]},${p[1]}`;
-    }
-
-    let seg = "";
-
-    for (let k = 0; k < run.length - 2; k++) {
-        const p0 = run[k];
-        const p1 = run[k + 1];
-        const p2 = run[k + 2];
-
-        // Simple 3‑point Bezier fit
-        const c1x = p1[0] + (p2[0] - p0[0]) / 6;
-        const c1y = p1[1] + (p2[1] - p0[1]) / 6;
-        const c2x = p1[0] + (p2[0] - p0[0]) * 5 / 6;
-        const c2y = p1[1] + (p2[1] - p0[1]) * 5 / 6;
-
-        seg += ` C ${c1x},${c1y} ${c2x},${c2y} ${p2[0]},${p2[1]}`;
-    }
-
-    return seg;
-}
-
-function angleBetween(p0, p1, p2) {
-    const v1 = [p0[0] - p1[0], p0[1] - p1[1]];
-    const v2 = [p2[0] - p1[0], p2[1] - p1[1]];
-
-    const dot = v1[0]*v2[0] + v1[1]*v2[1];
-    const m1 = Math.hypot(v1[0], v1[1]);
-    const m2 = Math.hypot(v2[0], v2[1]);
-
-    if (m1 === 0 || m2 === 0) return Math.PI;
-    return Math.acos(Math.min(Math.max(dot / (m1*m2), -1), 1));
-}
-
-
-function buildHybridSmoothPath2D(points, closed = true, angleThreshold = Math.PI * 0.95) {
-    // angleThreshold ≈ 171° → treat as straight
-
-    const n = points.length;
-    if (n < 2) return "";
-
-    const get = i => points[(i + n) % n];
-
-    let d = `M ${points[0][0]},${points[0][1]}`;
-
-    for (let i = 0; i < n; i++) {
-        const p0 = get(i - 1);
-        const p1 = get(i);
-        const p2 = get(i + 1);
-        const p3 = get(i + 2);
-
-        const ang = angleBetween(p0, p1, p2);
-
-        if (ang > angleThreshold) {
-            // Nearly straight → use a line
-            d += ` L ${p2[0]},${p2[1]}`;
-        } else {
-            // Curved → use Catmull–Rom → Bezier
-            const c1x = p1[0] + (p2[0] - p0[0]) / 6;
-            const c1y = p1[1] + (p2[1] - p0[1]) / 6;
-            const c2x = p2[0] - (p3[0] - p1[0]) / 6;
-            const c2y = p2[1] - (p3[1] - p1[1]) / 6;
-
-            d += ` C ${c1x},${c1y} ${c2x},${c2y} ${p2[0]},${p2[1]}`;
-        }
-    }
-
-    if (closed) d += " Z";
-    return d;
-}
-
-function buildSmoothPath2D(points, closed = true) {
-    if (points.length < 2) return "";
-
-    const n = points.length;
-    const get = i => points[(i + n) % n];
-
-    let d = `M ${points[0][0]},${points[0][1]}`;
-
-    for (let i = 0; i < n; i++) {
-        const p0 = get(i - 1);
-        const p1 = get(i);
-        const p2 = get(i + 1);
-        const p3 = get(i + 2);
-
-        // Catmull–Rom to cubic Bezier
-        const c1x = p1[0] + (p2[0] - p0[0]) / 6;
-        const c1y = p1[1] + (p2[1] - p0[1]) / 6;
-        const c2x = p2[0] - (p3[0] - p1[0]) / 6;
-        const c2y = p2[1] - (p3[1] - p1[1]) / 6;
-
-        d += ` C ${c1x},${c1y} ${c2x},${c2y} ${p2[0]},${p2[1]}`;
-    }
-
-    if (closed) d += " Z";
-    return d;
 }
 
 function buildOrderedLoops(segments) {

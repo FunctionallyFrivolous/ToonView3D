@@ -139,6 +139,237 @@ loader.load("model.obj", (obj) => {
     initializeModel(obj)
 });
 
+function computeFaceData(geometry) {
+    const index = geometry.index;
+    const pos = geometry.attributes.position;
+    const faceCount = index.count / 3;
+
+    const centroids = new Array(faceCount);
+    const normals   = new Array(faceCount);
+
+    const v0 = new THREE.Vector3();
+    const v1 = new THREE.Vector3();
+    const v2 = new THREE.Vector3();
+    const e1 = new THREE.Vector3();
+    const e2 = new THREE.Vector3();
+
+    for (let f = 0; f < faceCount; f++) {
+        const i0 = index.getX(f * 3 + 0);
+        const i1 = index.getX(f * 3 + 1);
+        const i2 = index.getX(f * 3 + 2);
+
+        v0.fromBufferAttribute(pos, i0);
+        v1.fromBufferAttribute(pos, i1);
+        v2.fromBufferAttribute(pos, i2);
+
+        const c = new THREE.Vector3()
+            .addVectors(v0, v1)
+            .add(v2)
+            .multiplyScalar(1 / 3);
+
+        e1.subVectors(v1, v0);
+        e2.subVectors(v2, v0);
+        const n = new THREE.Vector3().crossVectors(e1, e2).normalize();
+
+        centroids[f] = c;
+        normals[f]   = n;
+    }
+
+    return { centroids, normals };
+}
+
+function computePrincipalAxis(centroids, faceIndices) {
+    if (faceIndices.length === 0) return null;
+
+    const mean = new THREE.Vector3();
+    for (const f of faceIndices) {
+        mean.add(centroids[f]);
+    }
+    mean.multiplyScalar(1 / faceIndices.length);
+
+    // Covariance matrix of centroids
+    let xx = 0, xy = 0, xz = 0;
+    let yy = 0, yz = 0, zz = 0;
+
+    for (const f of faceIndices) {
+        const p = centroids[f];
+        const x = p.x - mean.x;
+        const y = p.y - mean.y;
+        const z = p.z - mean.z;
+
+        xx += x * x;
+        xy += x * y;
+        xz += x * z;
+        yy += y * y;
+        yz += y * z;
+        zz += z * z;
+    }
+
+    // Power iteration for dominant eigenvector
+    let v = new THREE.Vector3(1, 0, 0).normalize();
+    for (let iter = 0; iter < 15; iter++) {
+        const x = v.x, y = v.y, z = v.z;
+
+        const nx = xx * x + xy * y + xz * z;
+        const ny = xy * x + yy * y + yz * z;
+        const nz = xz * x + yz * y + zz * z;
+
+        v.set(nx, ny, nz);
+        if (v.lengthSq() === 0) break;
+        v.normalize();
+    }
+
+    return { origin: mean, dir: v.normalize() };
+}
+
+function mergeRingClusters(geometry, clusters) {
+    const { centroids } = computeFaceData(geometry);
+
+    // Compute average radius for each cluster
+    const clusterInfo = clusters.map((cluster) => {
+        const axis = computePrincipalAxis(centroids, cluster);
+        if (!axis) return null;
+
+        const { origin, dir } = axis;
+        const radii = [];
+
+        const tmp = new THREE.Vector3();
+        const proj = new THREE.Vector3();
+
+        for (const f of cluster) {
+            const c = centroids[f];
+            tmp.subVectors(c, origin);
+            const t = tmp.dot(dir);
+            proj.copy(dir).multiplyScalar(t).add(origin);
+            radii.push(c.distanceTo(proj));
+        }
+
+        const avg = radii.reduce((a, b) => a + b, 0) / radii.length;
+        const variance = radii.reduce((a, r) => a + (r - avg) * (r - avg), 0) / radii.length;
+
+        return { cluster, avgRadius: avg, variance, axis };
+    });
+
+    const merged = new Array(clusters.length).fill(false);
+    const result = [];
+
+    const REL_RADIUS_EPS = 0.05; // 5% tolerance
+
+    for (let i = 0; i < clusterInfo.length; i++) {
+        if (merged[i] || !clusterInfo[i]) continue;
+
+        const base = clusterInfo[i];
+        const mergedFaces = new Set(base.cluster);
+
+        for (let j = i + 1; j < clusterInfo.length; j++) {
+            if (merged[j] || !clusterInfo[j]) continue;
+
+            const other = clusterInfo[j];
+
+            // Compare radii (relative)
+            const maxR = Math.max(base.avgRadius, other.avgRadius);
+            if (maxR === 0) continue;
+
+            const relDiff = Math.abs(base.avgRadius - other.avgRadius) / maxR;
+            if (relDiff > REL_RADIUS_EPS) continue;
+
+            // Radii match → treat as same ring
+            other.cluster.forEach(f => mergedFaces.add(f));
+            merged[j] = true;
+        }
+
+        result.push(Array.from(mergedFaces));
+        merged[i] = true;
+    }
+
+    return result;
+}
+
+function mergeCylindricalClusters(geometry, clusters) {
+    const { centroids, normals } = computeFaceData(geometry);
+
+    const cylInfos = clusters
+        .map((c, idx) => ({ idx, info: analyzeClusterAsCylinder(geometry, centroids, normals, c) }))
+        .filter(x => x.info);
+
+    if (cylInfos.length < 2) return clusters;
+
+    // Sort by radius (just in case)
+    cylInfos.sort((a,b) => a.info.radius - b.info.radius);
+
+    // Merge all cylinders with same radius
+    const mergedFaces = new Set();
+    const baseR = cylInfos[0].info.radius;
+
+    for (const { idx, info } of cylInfos) {
+        if (Math.abs(info.radius - baseR) < baseR * 0.01) {
+            clusters[idx].forEach(f => mergedFaces.add(f));
+        }
+    }
+
+    // Build final cluster list
+    const result = [];
+    const mergedSet = new Set(cylInfos.map(x => x.idx));
+
+    result.push(Array.from(mergedFaces));
+
+    clusters.forEach((c, idx) => {
+        if (!mergedSet.has(idx)) result.push(c);
+    });
+
+    return result;
+}
+function analyzeClusterAsCylinder(geometry, centroids, normals, cluster) {
+    if (cluster.length < 8) return null; // too small
+
+    const axis = computePrincipalAxis(centroids, cluster);
+    if (!axis) return null;
+
+    const { origin, dir } = axis;
+
+    let radii = [];
+    let normalPerpSum = 0;
+
+    const tmp = new THREE.Vector3();
+    const proj = new THREE.Vector3();
+    const radial = new THREE.Vector3();
+
+    for (const f of cluster) {
+        const c = centroids[f];
+        const n = normals[f];
+
+        // distance from axis
+        tmp.subVectors(c, origin);
+        const t = tmp.dot(dir);
+        proj.copy(dir).multiplyScalar(t).add(origin);
+        const r = c.distanceTo(proj);
+        radii.push(r);
+
+        // normals perpendicular to axis?
+        const perp = 1 - Math.abs(n.dot(dir));
+        normalPerpSum += perp;
+    }
+
+    const avgR = radii.reduce((a,b)=>a+b,0) / radii.length;
+    const varR = radii.reduce((a,r)=>a+(r-avgR)*(r-avgR),0) / radii.length;
+    const normalPerp = normalPerpSum / cluster.length;
+
+    // Cylinder rules
+    if (normalPerp < 0.25) return null;          // normals must be perpendicular
+    if (avgR < 0.05) return null;               // exclude fillets
+    if (varR > avgR * 0.01) return null;        // radius must be consistent
+
+    return {
+        origin,
+        dir,
+        radius: avgR,
+        variance: varR,
+        normalPerp,
+        faces: cluster
+    };
+}
+
+
 function initializeModel(obj) {
     obj.traverse((child) => {
         if (child.isMesh) {
@@ -146,10 +377,14 @@ function initializeModel(obj) {
             child.geometry = mergeVertices(child.geometry);
             child.geometry.computeVertexNormals();
 
-            child.userData.surfaceClusters = buildSurfaceClusters(
-                child.geometry,
-                179
-            );
+            // child.userData.surfaceClusters = buildSurfaceClusters(
+            //     child.geometry,
+            //     179
+            // );
+
+            let clusters = buildSurfaceClusters(child.geometry, 179);
+            clusters = mergeCylindricalClusters(child.geometry, clusters);
+            child.userData.surfaceClusters = clusters;
 
             child.material = defaultFaceMaterial.clone();
 
@@ -424,6 +659,7 @@ function highlightFace(hit) {
     if (faceIndex == null) return;
 
     const cluster = clusters.find((c) => c.includes(faceIndex));
+    
     if (!cluster) return;
 
     deselectAllFaces();
@@ -962,7 +1198,6 @@ document.getElementById("saveRenderButton").addEventListener("click", () => {
     a.download = "render.png";
     a.click();
 });
-
 
 //
 function exportSVG() {

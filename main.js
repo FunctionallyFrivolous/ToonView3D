@@ -24,10 +24,6 @@ import { LineMaterial } from "https://esm.sh/three@0.164.0/examples/jsm/lines/Li
 import { LineSegments2 } from "https://esm.sh/three@0.164.0/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "https://esm.sh/three@0.164.0/examples/jsm/lines/LineSegmentsGeometry.js";
 
-import * as martinez from "https://esm.sh/martinez-polygon-clipping";
-
-
-
 // ------------------------------------------------------------
 // Scene setup
 // ------------------------------------------------------------
@@ -369,7 +365,6 @@ function analyzeClusterAsCylinder(geometry, centroids, normals, cluster) {
     };
 }
 
-
 function initializeModel(obj) {
     obj.traverse((child) => {
         if (child.isMesh) {
@@ -502,16 +497,14 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, style) {
         existing.material.dispose();
     }
 
-    // Boundary edges only (correct logic)
     const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
     if (edgeAttr.count === 0) {
         meshLines.delete(clusterIndex);
         return;
     }
 
-    // ⭐ Use LineSegmentsGeometry (NOT LineGeometry)
     const geo = new LineSegmentsGeometry();
-    geo.setPositions(edgeAttr.array); // preserves segment boundaries
+    geo.setPositions(edgeAttr.array);
 
     const mat = new LineMaterial({
         color: style.color.getHex(),
@@ -522,24 +515,31 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, style) {
     });
 
     mat.resolution.set(window.innerWidth, window.innerHeight);
+
     mat.depthTest = true;
     mat.depthWrite = true;
-    mat.renderOrder = 2;
+    mat.polygonOffset = false;
 
-    mat.polygonOffset = true;
-    mat.polygonOffsetFactor = -2;
-    mat.polygonOffsetUnits = -2;
+    // Inject user‑controlled depth bias
+    mat.onBeforeCompile = (shader) => {
+        shader.vertexShader = shader.vertexShader.replace(
+            'gl_Position = clip;',
+            `
+            gl_Position = clip;
+            gl_Position.z -= ${edgeDepthBias} * gl_Position.w;
+            `
+        );
+    };
 
-    // ⭐ Use LineSegments2 (NOT Line2)
     const line = new LineSegments2(geo, mat);
     line.computeLineDistances();
     line.applyMatrix4(mesh.matrixWorld);
-    line.renderOrder = 5;
+
+    line.renderOrder = mesh.renderOrder + 1;
     line.raycast = () => {};
 
     scene.add(line);
     meshLines.set(clusterIndex, line);
-    currentEdgeLayers.push(line); 
 }
 
 
@@ -1479,6 +1479,26 @@ document.getElementById("saveSVGButton").addEventListener("click", () => {
 
     URL.revokeObjectURL(url);
 });
+
+document.getElementById("edgeBias").addEventListener("input", (e) => {
+    edgeDepthBias = parseFloat(e.target.value);
+
+    // Rebuild all persistent edge lines with the new bias
+    if (currentModel) {
+        currentModel.traverse(obj => {
+            if (obj.isMesh) {
+                const clusters = obj.userData.surfaceClusters;
+                if (!clusters) return;
+
+                clusters.forEach(cluster => {
+                    const style = edgeStyles.get(obj).get(clusters.indexOf(cluster));
+                    updatePersistentEdgeLinesForCluster(obj, cluster, style);
+                });
+            }
+        });
+    }
+});
+
 
 
 // ------------------------------------------------------------

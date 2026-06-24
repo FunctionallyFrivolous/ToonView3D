@@ -27,3 +27,5 @@ const edgeStyles = new WeakMap();
 
 let currentModel = null;
 let currentEdgeLayers = [];
+
+let edgeDepthBias = 0.0001;

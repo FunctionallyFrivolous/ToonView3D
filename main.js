@@ -99,28 +99,10 @@ const defaultFaceMaterial = new THREE.MeshStandardMaterial({
 // State
 // ------------------------------------------------------------
 
-let boundaryEdges = null;
-let currentSelectedMesh = null;
-let currentSelectedCluster = null;
-
-let pointerDown = false;
-let moved = false;
-let downX = 0;
-let downY = 0;
-
-let pickMode = false;
-
-const undoStack = [];
-const redoStack = [];
-
 const edgeStyles = new WeakMap();          // mesh → Map(clusterIndex → style)
 const persistentEdgeLines = new WeakMap(); // mesh → Map(clusterIndex → LineSegments2)
 
 const edgeOverrides = new WeakMap(); // mesh → Map(edgeIndex → style)
-
-
-const HIGHLIGHT_LAYER = 2;
-
 
 // ------------------------------------------------------------
 // UI elements
@@ -230,103 +212,6 @@ function computePrincipalAxis(centroids, faceIndices) {
     return { origin: mean, dir: v.normalize() };
 }
 
-function mergeRingClusters(geometry, clusters) {
-    const { centroids } = computeFaceData(geometry);
-
-    // Compute average radius for each cluster
-    const clusterInfo = clusters.map((cluster) => {
-        const axis = computePrincipalAxis(centroids, cluster);
-        if (!axis) return null;
-
-        const { origin, dir } = axis;
-        const radii = [];
-
-        const tmp = new THREE.Vector3();
-        const proj = new THREE.Vector3();
-
-        for (const f of cluster) {
-            const c = centroids[f];
-            tmp.subVectors(c, origin);
-            const t = tmp.dot(dir);
-            proj.copy(dir).multiplyScalar(t).add(origin);
-            radii.push(c.distanceTo(proj));
-        }
-
-        const avg = radii.reduce((a, b) => a + b, 0) / radii.length;
-        const variance = radii.reduce((a, r) => a + (r - avg) * (r - avg), 0) / radii.length;
-
-        return { cluster, avgRadius: avg, variance, axis };
-    });
-
-    const merged = new Array(clusters.length).fill(false);
-    const result = [];
-
-    const REL_RADIUS_EPS = 0.05; // 5% tolerance
-
-    for (let i = 0; i < clusterInfo.length; i++) {
-        if (merged[i] || !clusterInfo[i]) continue;
-
-        const base = clusterInfo[i];
-        const mergedFaces = new Set(base.cluster);
-
-        for (let j = i + 1; j < clusterInfo.length; j++) {
-            if (merged[j] || !clusterInfo[j]) continue;
-
-            const other = clusterInfo[j];
-
-            // Compare radii (relative)
-            const maxR = Math.max(base.avgRadius, other.avgRadius);
-            if (maxR === 0) continue;
-
-            const relDiff = Math.abs(base.avgRadius - other.avgRadius) / maxR;
-            if (relDiff > REL_RADIUS_EPS) continue;
-
-            // Radii match → treat as same ring
-            other.cluster.forEach(f => mergedFaces.add(f));
-            merged[j] = true;
-        }
-
-        result.push(Array.from(mergedFaces));
-        merged[i] = true;
-    }
-
-    return result;
-}
-
-function mergeCylindricalClusters(geometry, clusters) {
-    const { centroids, normals } = computeFaceData(geometry);
-
-    const cylInfos = clusters
-        .map((c, idx) => ({ idx, info: analyzeClusterAsCylinder(geometry, centroids, normals, c) }))
-        .filter(x => x.info);
-
-    if (cylInfos.length < 2) return clusters;
-
-    // Sort by radius (just in case)
-    cylInfos.sort((a,b) => a.info.radius - b.info.radius);
-
-    // Merge all cylinders with same radius
-    const mergedFaces = new Set();
-    const baseR = cylInfos[0].info.radius;
-
-    for (const { idx, info } of cylInfos) {
-        if (Math.abs(info.radius - baseR) < baseR * 0.01) {
-            clusters[idx].forEach(f => mergedFaces.add(f));
-        }
-    }
-
-    // Build final cluster list
-    const result = [];
-    const mergedSet = new Set(cylInfos.map(x => x.idx));
-
-    result.push(Array.from(mergedFaces));
-
-    clusters.forEach((c, idx) => {
-        if (!mergedSet.has(idx)) result.push(c);
-    });
-
-    return result;
-}
 function analyzeClusterAsCylinder(geometry, centroids, normals, cluster) {
     if (cluster.length < 8) return null; // too small
 
@@ -390,7 +275,6 @@ function initializeModel(obj) {
             // );
 
             let clusters = buildSurfaceClusters(child.geometry, 179);
-            // clusters = mergeCylindricalClusters(child.geometry, clusters);
             child.userData.surfaceClusters = clusters;
 
             child.material = defaultFaceMaterial.clone();
@@ -412,7 +296,7 @@ function initializeModel(obj) {
             child.material.vertexColors = true;
             child.material.transparent = true;
             child.material.depthWrite = false, // Keep this false in order to avoid the weird transparency cancellation behavior...
-            child.material.depthTest = true
+            child.material.depthTest = true // Keep this true in order to avoid the edge-half-obscured-by-face issue
 
             edgeStyles.set(child, new Map());
             persistentEdgeLines.set(child, new Map());
@@ -447,15 +331,27 @@ function initializeModel(obj) {
     currentModel = obj;
 }
 
-function setSingleEdgeStyle(mesh, edgeIndex, style) {
-    const overrides = edgeOverrides.get(mesh);
-    overrides.set(edgeIndex, {
+function setSingleEdgeStyle(mesh, clusterIndex, edgeIndex, style) {
+    let meshOverrides = edgeOverrides.get(mesh);
+    if (!meshOverrides) {
+        meshOverrides = new Map();
+        edgeOverrides.set(mesh, meshOverrides);
+    }
+
+    let clusterOverrides = meshOverrides.get(clusterIndex);
+    if (!clusterOverrides) {
+        clusterOverrides = new Map();
+        meshOverrides.set(clusterIndex, clusterOverrides);
+    }
+
+    clusterOverrides.set(edgeIndex, {
         color: style.color.clone(),
         width: style.width,
         dashed: style.dashed,
         dashScale: style.dashScale
     });
 }
+
 
 
 // ------------------------------------------------------------
@@ -514,9 +410,9 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
     if (clusterIndex === -1) return;
 
     const meshLines = persistentEdgeLines.get(mesh);
-    const overrides = edgeOverrides.get(mesh);
+    const meshOverrides = edgeOverrides.get(mesh);
+    const clusterOverrides = meshOverrides ? meshOverrides.get(clusterIndex) : null;
 
-    // Remove old lines for this cluster
     const existing = meshLines.get(clusterIndex);
     if (existing) {
         existing.forEach(line => {
@@ -526,7 +422,6 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
         });
     }
 
-    // Prepare new container
     const newLines = [];
 
     const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
@@ -534,11 +429,8 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
 
     for (let i = 0; i < arr.length; i += 6) {
         const edgeIndex = i / 6;
+        const s = clusterOverrides && clusterOverrides.get(edgeIndex) || clusterStyle;
 
-        // Pick override or cluster style
-        const s = overrides.get(edgeIndex) || clusterStyle;
-
-        // Build geometry for this single edge
         const geo = new LineSegmentsGeometry();
         geo.setPositions([
             arr[i+0], arr[i+1], arr[i+2],
@@ -555,7 +447,6 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
 
         mat.resolution.set(window.innerWidth, window.innerHeight);
 
-        // Depth bias
         mat.onBeforeCompile = (shader) => {
             shader.vertexShader = shader.vertexShader.replace(
                 'gl_Position = clip;',
@@ -584,6 +475,7 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
 // ------------------------------------------------------------
 
 function paintCluster(mesh, cluster, color, opacity, recordHistory = true) {
+    if (edgeMode) return
     const geo = mesh.geometry;
     const index = geo.index;
     const colors = geo.attributes.color;
@@ -640,39 +532,12 @@ function paintCluster(mesh, cluster, color, opacity, recordHistory = true) {
 // Edge painting
 // ------------------------------------------------------------
 
-function paintEdgeStyle(mesh, cluster, style, recordHistory = true) {
+function paintEdgeStyle(mesh, cluster, style) {
     const clusters = mesh.userData.surfaceClusters;
     const clusterIndex = clusters.indexOf(cluster);
     if (clusterIndex === -1) return;
 
     const meshStyles = edgeStyles.get(mesh);
-    const prev = meshStyles.get(clusterIndex) || {
-        color: new THREE.Color(0x000000),
-        width: 1,
-        dashed: false,
-    };
-
-    if (recordHistory) {
-        undoStack.push({
-            type: "edgeStyle",
-            mesh,
-            cluster,
-            previous: {
-                color: prev.color.clone(),
-                width: prev.width,
-                dashed: prev.dashed,
-                dashScale: prev.dashScale ?? 1
-            },
-            next: {
-                color: style.color.clone(),
-                width: style.width,
-                dashed: style.dashed,
-                dashScale: style.dashScale
-            }
-        });
-        redoStack.length = 0;
-    }
-
     meshStyles.set(clusterIndex, {
         color: style.color.clone(),
         width: style.width,
@@ -680,50 +545,18 @@ function paintEdgeStyle(mesh, cluster, style, recordHistory = true) {
         dashScale: style.dashScale
     });
 
-    // NEW: clear per-edge overrides for this cluster
-    const overrides = edgeOverrides.get(mesh);
-    if (overrides) {
-        const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
-        const arr = edgeAttr.array;
-
-        for (let i = 0; i < arr.length; i += 6) {
-            const edgeIndex = i / 6;
-            overrides.delete(edgeIndex);
-        }
+    const meshOverrides = edgeOverrides.get(mesh);
+    if (meshOverrides) {
+        meshOverrides.delete(clusterIndex);
     }
 
     updatePersistentEdgeLinesForCluster(mesh, cluster, style);
 }
 
+
 // ------------------------------------------------------------
 // Selection highlight (boundary-only, same logic as thick lines)
 // ------------------------------------------------------------
-
-// function logClusterEdges(mesh, cluster) {
-//     const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
-//     const arr = edgeAttr.array;
-
-//     console.group("Cluster Boundary Edges");
-
-//     for (let i = 0; i < arr.length; i += 6) {
-//         const id = i / 6;
-
-//         const p1 = {
-//             x: arr[i + 0],
-//             y: arr[i + 1],
-//             z: arr[i + 2]
-//         };
-//         const p2 = {
-//             x: arr[i + 3],
-//             y: arr[i + 4],
-//             z: arr[i + 5]
-//         };
-
-//         console.log(`Edge ${id}`, p1, p2);
-//     }
-
-//     console.groupEnd();
-// }
 
 let singleEdgeHighlight = null;
 
@@ -770,7 +603,7 @@ function highlightSingleEdge(mesh, cluster, edgeIndex) {
 function applyUIEdgeStyleToSingleEdge() {
     if (!currentSelectedEdge) return;
 
-    const { mesh, edgeIndex } = currentSelectedEdge;
+    const { mesh, cluster, edgeIndex } = currentSelectedEdge;
 
     const style = {
         color: new THREE.Color(edgeColorInput.value),
@@ -779,20 +612,19 @@ function applyUIEdgeStyleToSingleEdge() {
         dashScale: parseFloat(edgeDashScaleInput.value)
     };
 
-    // Save override
-    setSingleEdgeStyle(mesh, edgeIndex, style);
-
-    // Rebuild persistent edges for this cluster
-    const cluster = currentSelectedEdge.cluster;
     const clusters = mesh.userData.surfaceClusters;
     const clusterIndex = clusters.indexOf(cluster);
+    if (clusterIndex === -1) return;
+
+    setSingleEdgeStyle(mesh, clusterIndex, edgeIndex, style);
+
     const clusterStyle = edgeStyles.get(mesh).get(clusterIndex);
 
     updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle);
 
-    // Update highlight line
     highlightSingleEdge(mesh, cluster, edgeIndex);
 }
+
 
 function closestPointOnSegment(p, a, b) {
     const ab = new THREE.Vector3().subVectors(b, a);
@@ -852,22 +684,43 @@ function highlightFace(hit) {
         const mesh = hit.object;
         const cluster = currentSelectedCluster;
 
-        // Compute click point in world space
         const clickPoint = hit.point.clone();
 
-        // Find nearest edge
-        const nearest = findNearestEdge(mesh, cluster, clickPoint);
+        const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+        const arr = edgeAttr.array;
 
-        if (nearest !== -1) {
-            highlightSingleEdge(mesh, cluster, nearest);
-            applyUIEdgeStyleToSingleEdge();
+        let bestIndex = -1;
+        let bestDist = Infinity;
+
+        for (let i = 0; i < arr.length; i += 6) {
+            const edgeIndex = i / 6;
+
+            const p1 = new THREE.Vector3(arr[i+0], arr[i+1], arr[i+2]).applyMatrix4(mesh.matrixWorld);
+            const p2 = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]).applyMatrix4(mesh.matrixWorld);
+
+            const cp = closestPointOnSegment(clickPoint, p1, p2);
+            const dist = cp.distanceTo(clickPoint);
+
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestIndex = edgeIndex;
+            }
         }
 
+        if (bestIndex !== -1) {
+            highlightSingleEdge(mesh, cluster, bestIndex);
+
+            if (pickMode) {
+                // PICK MODE: load edge style into UI, do NOT apply anything
+                loadEdgeStyleIntoUI(mesh, cluster, bestIndex);
+            } else {
+                // NORMAL MODE: apply UI style immediately
+                applyUIEdgeStyleToSingleEdge();
+            }
+        }
         return;
     }
-
-    // logClusterEdges(hit.object, cluster);
-
+    
     if (pickMode) {
         loadFacePropertiesFromCluster(hit.object, cluster);
         loadEdgeStyleIntoUI(hit.object, cluster);
@@ -1023,17 +876,26 @@ function loadFacePropertiesFromCluster(mesh, cluster) {
     opacityInput.value = a;
 }
 
-function loadEdgeStyleIntoUI(mesh, cluster) {
-    const meshStyles = edgeStyles.get(mesh);
-    const clusterIndex = mesh.userData.surfaceClusters.indexOf(cluster);
-    const style = meshStyles.get(clusterIndex);
-    if (!style) return;
+function loadEdgeStyleIntoUI(mesh, cluster, edgeIndex) {
+    const clusters = mesh.userData.surfaceClusters;
+    const clusterIndex = clusters.indexOf(cluster);
 
-    edgeColorInput.value = "#" + style.color.getHexString();
-    edgeWidthInput.value = style.width;
-    edgeDashScaleInput.value = style.dashScale ?? 1;
-    edgeDashedInput.checked = style.dashed;
+    const meshOverrides = edgeOverrides.get(mesh);
+    const clusterOverrides = meshOverrides ? meshOverrides.get(clusterIndex) : null;
+
+    // If this edge has an override, use it
+    const override = clusterOverrides ? clusterOverrides.get(edgeIndex) : null;
+
+    // Otherwise use the cluster style
+    const clusterStyle = edgeStyles.get(mesh).get(clusterIndex);
+    const s = override || clusterStyle;
+
+    edgeColorInput.value = "#" + s.color.getHexString();
+    edgeWidthInput.value = s.width;
+    edgeDashedInput.checked = s.dashed;
+    edgeDashScaleInput.value = s.dashScale;
 }
+
 
 
 // ------------------------------------------------------------
@@ -1149,22 +1011,12 @@ function updateAllLineResolutions() {
     const w = window.innerWidth;
     const h = window.innerHeight;
 
-    // Iterate over all meshes in the scene
-    scene.traverse((child) => {
-        if (!child.isMesh) return;
-
-        const clusterMap = persistentEdgeLines.get(child);
-        if (!clusterMap) return;
-
-        // clusterMap is a normal Map → iterable
-        for (const [clusterIndex, line] of clusterMap) {
-            if (line?.material?.resolution) {
-                line.material.resolution.set(w, h);
-            }
+    scene.traverse((obj) => {
+        if (obj.isLineSegments2 && obj.material && obj.material.resolution) {
+            obj.material.resolution.set(w, h);
         }
     });
 }
-
 
 window.addEventListener("resize", () => {
     const aspect = window.innerWidth / window.innerHeight;
@@ -1441,6 +1293,36 @@ window.addEventListener("keyup", (e) => {
     if (e.key === "e") edgeMode = false;
 });
 
+const faceModeRadio = document.getElementById("faceModeRadio");
+const edgeModeRadio = document.getElementById("edgeModeRadio");
+
+faceModeRadio.addEventListener("change", () => {
+    if (faceModeRadio.checked) {
+        edgeMode = false;
+        deselectEdge(); // ensure any edge selection is cleared
+    }
+});
+
+edgeModeRadio.addEventListener("change", () => {
+    if (edgeModeRadio.checked) {
+        edgeMode = true;
+    }
+});
+
+const paintModeRadio = document.getElementById("paintModeRadio");
+const pickModeRadio = document.getElementById("pickModeRadio");
+
+paintModeRadio.addEventListener("change", () => {
+    if (paintModeRadio.checked) {
+        pickMode = false;
+    }
+});
+
+pickModeRadio.addEventListener("change", () => {
+    if (pickModeRadio.checked) {
+        pickMode = true;
+    }
+});
 
 //
 function exportSVG() {
@@ -1700,13 +1582,6 @@ function buildOrderedLoops(segments) {
 
     return loops;
 }
-
-function loopSignature(loop) {
-    const pts = loop.map(v => `${v.x.toFixed(5)},${v.y.toFixed(5)},${v.z.toFixed(5)}`);
-    pts.sort();
-    return pts.join("|");
-}
-
 
 document.getElementById("saveSVGButton").addEventListener("click", () => {
     const svg = exportSVG();

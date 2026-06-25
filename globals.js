@@ -6,15 +6,13 @@ const HIGHLIGHT_LAYER = 2;
 let currentSelectedMesh = null;
 let currentSelectedCluster = null;
 
-// let currentSelectedEdge = null;      // { mesh, clusterIndex, edgeIndex }
+let currentSelectedEdge = null; // { mesh, cluster, edgeIndex, p1, p2 }
 let edgeHighlightLine = null;        // LineSegments2 for selected edge
-
 
 const undoStack = [];
 const redoStack = [];
 
 let pickMode = false;
-
 
 let pointerDown = false;
 let moved = false;
@@ -30,5 +28,4 @@ let currentEdgeLayers = [];
 
 let edgeDepthBias = 0.0001;
 
-let currentSelectedEdge = null; // { mesh, cluster, edgeIndex, p1, p2 }
 

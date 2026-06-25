@@ -1,15 +1,24 @@
 // TO DO:
-    // Output/Export high res render
-        // Smooth geometry. Crisp lines.
-        // Render on button press. Show rendered image below main canvas
-        // Export SVG?
-    // Paint all faces upon initial load (eliminate weird artifacts in the default state that are not present in painted state...)
-    // Generate axis line?
+    // Individual edge selection / painting
+        // Need this for viable workaround for cylinder seam issue
+        //
+    // Paint all faces upon initial load? 
+        // Eliminate weird artifacts in the default state that are not present in painted state...
+    // Generate axis line? Offset faces?
     // Snap to ortho views with keys (front/side/top)?
-    // Add back a pick-mode button to UI (for mobile)
-    // Multi face select
-    // Select entire mesh
-    // Select individual edges?
+    // High res render Improvements
+        // Smooth geometry
+    // UI Improvements
+        // Move visualizer settings to separate UI panel (hidden?)
+            // Edge Depth Bias, etc.
+        // Separate panel for selection mode settings
+            // Mesh vs face vs edge selection mode
+            // Multi select?
+        // Style panel
+            // Add buttons for paint vs pick modes (for mobile)
+    // BACK BURNER:
+        // SVG export
+            // Just need silhouette edges to work right...
 
 // ------------------------------------------------------------
 // Imports
@@ -106,6 +115,9 @@ const redoStack = [];
 
 const edgeStyles = new WeakMap();          // mesh → Map(clusterIndex → style)
 const persistentEdgeLines = new WeakMap(); // mesh → Map(clusterIndex → LineSegments2)
+
+const edgeOverrides = new WeakMap(); // mesh → Map(edgeIndex → style)
+
 
 const HIGHLIGHT_LAYER = 2;
 
@@ -378,7 +390,7 @@ function initializeModel(obj) {
             // );
 
             let clusters = buildSurfaceClusters(child.geometry, 179);
-            clusters = mergeCylindricalClusters(child.geometry, clusters);
+            // clusters = mergeCylindricalClusters(child.geometry, clusters);
             child.userData.surfaceClusters = clusters;
 
             child.material = defaultFaceMaterial.clone();
@@ -404,6 +416,9 @@ function initializeModel(obj) {
 
             edgeStyles.set(child, new Map());
             persistentEdgeLines.set(child, new Map());
+
+            edgeOverrides.set(child, new Map());
+
 
             const defaultStyle = {
                 color: new THREE.Color("#000000"),
@@ -431,6 +446,17 @@ function initializeModel(obj) {
     scene.add(obj);
     currentModel = obj;
 }
+
+function setSingleEdgeStyle(mesh, edgeIndex, style) {
+    const overrides = edgeOverrides.get(mesh);
+    overrides.set(edgeIndex, {
+        color: style.color.clone(),
+        width: style.width,
+        dashed: style.dashed,
+        dashScale: style.dashScale
+    });
+}
+
 
 // ------------------------------------------------------------
 // Boundary-only edge extraction (correct logic)
@@ -482,64 +508,74 @@ function getBoundaryEdges(geometry, cluster) {
 // Persistent fat-line edges (boundary-only, diagonal-free)
 // ------------------------------------------------------------
 
-function updatePersistentEdgeLinesForCluster(mesh, cluster, style) {
+function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
     const clusters = mesh.userData.surfaceClusters;
     const clusterIndex = clusters.indexOf(cluster);
     if (clusterIndex === -1) return;
 
     const meshLines = persistentEdgeLines.get(mesh);
+    const overrides = edgeOverrides.get(mesh);
 
-    // Remove old line
+    // Remove old lines for this cluster
     const existing = meshLines.get(clusterIndex);
     if (existing) {
-        scene.remove(existing);
-        existing.geometry.dispose();
-        existing.material.dispose();
+        existing.forEach(line => {
+            scene.remove(line);
+            line.geometry.dispose();
+            line.material.dispose();
+        });
     }
+
+    // Prepare new container
+    const newLines = [];
 
     const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
-    if (edgeAttr.count === 0) {
-        meshLines.delete(clusterIndex);
-        return;
+    const arr = edgeAttr.array;
+
+    for (let i = 0; i < arr.length; i += 6) {
+        const edgeIndex = i / 6;
+
+        // Pick override or cluster style
+        const s = overrides.get(edgeIndex) || clusterStyle;
+
+        // Build geometry for this single edge
+        const geo = new LineSegmentsGeometry();
+        geo.setPositions([
+            arr[i+0], arr[i+1], arr[i+2],
+            arr[i+3], arr[i+4], arr[i+5]
+        ]);
+
+        const mat = new LineMaterial({
+            color: s.color.getHex(),
+            linewidth: s.width * window.devicePixelRatio,
+            dashed: s.dashed,
+            dashSize: 1 * s.dashScale,
+            gapSize: 1 * s.dashScale
+        });
+
+        mat.resolution.set(window.innerWidth, window.innerHeight);
+
+        // Depth bias
+        mat.onBeforeCompile = (shader) => {
+            shader.vertexShader = shader.vertexShader.replace(
+                'gl_Position = clip;',
+                `
+                gl_Position = clip;
+                gl_Position.z -= ${edgeDepthBias} * gl_Position.w;
+                `
+            );
+        };
+
+        const line = new LineSegments2(geo, mat);
+        line.computeLineDistances();
+        line.applyMatrix4(mesh.matrixWorld);
+        line.renderOrder = mesh.renderOrder + 1;
+
+        scene.add(line);
+        newLines.push(line);
     }
 
-    const geo = new LineSegmentsGeometry();
-    geo.setPositions(edgeAttr.array);
-
-    const mat = new LineMaterial({
-        color: style.color.getHex(),
-        linewidth: style.width * window.devicePixelRatio,
-        dashed: style.dashed,
-        dashSize: 1 * style.dashScale,
-        gapSize: 1 * style.dashScale
-    });
-
-    mat.resolution.set(window.innerWidth, window.innerHeight);
-
-    mat.depthTest = true;
-    mat.depthWrite = true;
-    mat.polygonOffset = false;
-
-    // Inject user‑controlled depth bias
-    mat.onBeforeCompile = (shader) => {
-        shader.vertexShader = shader.vertexShader.replace(
-            'gl_Position = clip;',
-            `
-            gl_Position = clip;
-            gl_Position.z -= ${edgeDepthBias} * gl_Position.w;
-            `
-        );
-    };
-
-    const line = new LineSegments2(geo, mat);
-    line.computeLineDistances();
-    line.applyMatrix4(mesh.matrixWorld);
-
-    line.renderOrder = mesh.renderOrder + 1;
-    line.raycast = () => {};
-
-    scene.add(line);
-    meshLines.set(clusterIndex, line);
+    meshLines.set(clusterIndex, newLines);
 }
 
 
@@ -644,6 +680,18 @@ function paintEdgeStyle(mesh, cluster, style, recordHistory = true) {
         dashScale: style.dashScale
     });
 
+    // NEW: clear per-edge overrides for this cluster
+    const overrides = edgeOverrides.get(mesh);
+    if (overrides) {
+        const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+        const arr = edgeAttr.array;
+
+        for (let i = 0; i < arr.length; i += 6) {
+            const edgeIndex = i / 6;
+            overrides.delete(edgeIndex);
+        }
+    }
+
     updatePersistentEdgeLinesForCluster(mesh, cluster, style);
 }
 
@@ -651,7 +699,140 @@ function paintEdgeStyle(mesh, cluster, style, recordHistory = true) {
 // Selection highlight (boundary-only, same logic as thick lines)
 // ------------------------------------------------------------
 
+// function logClusterEdges(mesh, cluster) {
+//     const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+//     const arr = edgeAttr.array;
+
+//     console.group("Cluster Boundary Edges");
+
+//     for (let i = 0; i < arr.length; i += 6) {
+//         const id = i / 6;
+
+//         const p1 = {
+//             x: arr[i + 0],
+//             y: arr[i + 1],
+//             z: arr[i + 2]
+//         };
+//         const p2 = {
+//             x: arr[i + 3],
+//             y: arr[i + 4],
+//             z: arr[i + 5]
+//         };
+
+//         console.log(`Edge ${id}`, p1, p2);
+//     }
+
+//     console.groupEnd();
+// }
+
+let singleEdgeHighlight = null;
+
+function highlightSingleEdge(mesh, cluster, edgeIndex) {
+    // Remove previous highlight
+    if (singleEdgeHighlight) {
+        scene.remove(singleEdgeHighlight);
+        singleEdgeHighlight.geometry.dispose();
+        singleEdgeHighlight.material.dispose();
+        singleEdgeHighlight = null;
+    }
+
+    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+    const arr = edgeAttr.array;
+
+    const i = edgeIndex * 6;
+
+    const p1 = new THREE.Vector3(arr[i+0], arr[i+1], arr[i+2]);
+    const p2 = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]);
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute([
+        p1.x, p1.y, p1.z,
+        p2.x, p2.y, p2.z
+    ], 3));
+
+    const mat = new THREE.LineBasicMaterial({
+        color: 0xff0000,
+        linewidth: 3
+    });
+
+    singleEdgeHighlight = new THREE.LineSegments(geo, mat);
+    singleEdgeHighlight.applyMatrix4(mesh.matrixWorld);
+
+    singleEdgeHighlight.material.depthTest = false;
+    singleEdgeHighlight.material.depthWrite = false;
+    singleEdgeHighlight.renderOrder = 999;
+
+    scene.add(singleEdgeHighlight);
+
+    currentSelectedEdge = { mesh, cluster, edgeIndex, p1, p2 };
+}
+
+function applyUIEdgeStyleToSingleEdge() {
+    if (!currentSelectedEdge) return;
+
+    const { mesh, edgeIndex } = currentSelectedEdge;
+
+    const style = {
+        color: new THREE.Color(edgeColorInput.value),
+        width: parseFloat(edgeWidthInput.value),
+        dashed: edgeDashedInput.checked,
+        dashScale: parseFloat(edgeDashScaleInput.value)
+    };
+
+    // Save override
+    setSingleEdgeStyle(mesh, edgeIndex, style);
+
+    // Rebuild persistent edges for this cluster
+    const cluster = currentSelectedEdge.cluster;
+    const clusters = mesh.userData.surfaceClusters;
+    const clusterIndex = clusters.indexOf(cluster);
+    const clusterStyle = edgeStyles.get(mesh).get(clusterIndex);
+
+    updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle);
+
+    // Update highlight line
+    highlightSingleEdge(mesh, cluster, edgeIndex);
+}
+
+function closestPointOnSegment(p, a, b) {
+    const ab = new THREE.Vector3().subVectors(b, a);
+    const t = new THREE.Vector3().subVectors(p, a).dot(ab) / ab.lengthSq();
+    const clamped = Math.max(0, Math.min(1, t));
+    return new THREE.Vector3().copy(a).addScaledVector(ab, clamped);
+}
+
+function findNearestEdge(mesh, cluster, clickPoint) {
+    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+    const arr = edgeAttr.array;
+
+    let bestIndex = -1;
+    let bestDist = Infinity;
+
+    for (let i = 0; i < arr.length; i += 6) {
+        const edgeIndex = i / 6;
+
+        const p1 = new THREE.Vector3(arr[i+0], arr[i+1], arr[i+2]).applyMatrix4(mesh.matrixWorld);
+        const p2 = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]).applyMatrix4(mesh.matrixWorld);
+
+        const cp = closestPointOnSegment(clickPoint, p1, p2);
+        const dist = cp.distanceTo(clickPoint);
+
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestIndex = edgeIndex;
+        }
+    }
+
+    return bestIndex;
+}
+
+
 function highlightFace(hit) {
+    // If not in edge mode, selecting a face should clear any selected edge
+    if (!edgeMode) {
+        deselectEdge();
+    }
+
     const clusters = hit.object.userData.surfaceClusters;
     if (!clusters) return;
 
@@ -666,6 +847,26 @@ function highlightFace(hit) {
 
     currentSelectedMesh = hit.object;
     currentSelectedCluster = cluster;
+
+    if (edgeMode) {
+        const mesh = hit.object;
+        const cluster = currentSelectedCluster;
+
+        // Compute click point in world space
+        const clickPoint = hit.point.clone();
+
+        // Find nearest edge
+        const nearest = findNearestEdge(mesh, cluster, clickPoint);
+
+        if (nearest !== -1) {
+            highlightSingleEdge(mesh, cluster, nearest);
+            applyUIEdgeStyleToSingleEdge();
+        }
+
+        return;
+    }
+
+    // logClusterEdges(hit.object, cluster);
 
     if (pickMode) {
         loadFacePropertiesFromCluster(hit.object, cluster);
@@ -730,7 +931,26 @@ function deselectAllFaces() {
 
     currentSelectedMesh = null;
     currentSelectedCluster = null;
+    currentSelectedEdge = null;
+
+
+    // NEW: also clear any selected edge
+    deselectEdge();
 }
+
+function deselectEdge() {
+    if (singleEdgeHighlight) {
+        scene.remove(singleEdgeHighlight);
+        singleEdgeHighlight.geometry.dispose();
+        singleEdgeHighlight.material.dispose();
+        singleEdgeHighlight = null;
+    }
+
+    currentSelectedMesh = null;
+    currentSelectedCluster = null;
+    currentSelectedEdge = null;
+}
+
 
 
 // ------------------------------------------------------------
@@ -833,8 +1053,18 @@ colorInput.addEventListener("input", applyUIFacePaint);
 opacityInput.addEventListener("input", applyUIFacePaint);
 
 function applyUIEdgeStyle() {
-    if (!currentSelectedMesh || !currentSelectedCluster) return;
+    // If a single edge is selected → only update that edge
+    if (currentSelectedEdge) {
+        applyUIEdgeStyleToSingleEdge();
+        return;
+    }
 
+    // If no face is selected → do nothing
+    if (!currentSelectedMesh || !currentSelectedCluster) {
+        return;
+    }
+
+    // Otherwise apply cluster-level style
     const style = {
         color: new THREE.Color(edgeColorInput.value),
         width: parseFloat(edgeWidthInput.value),
@@ -844,6 +1074,8 @@ function applyUIEdgeStyle() {
 
     paintEdgeStyle(currentSelectedMesh, currentSelectedCluster, style);
 }
+
+
 
 edgeColorInput.addEventListener("input", applyUIEdgeStyle);
 edgeWidthInput.addEventListener("input", applyUIEdgeStyle);
@@ -1198,6 +1430,17 @@ document.getElementById("saveRenderButton").addEventListener("click", () => {
     a.download = "render.png";
     a.click();
 });
+
+let edgeMode = false;
+
+window.addEventListener("keydown", (e) => {
+    if (e.key === "e") edgeMode = true;
+});
+
+window.addEventListener("keyup", (e) => {
+    if (e.key === "e") edgeMode = false;
+});
+
 
 //
 function exportSVG() {

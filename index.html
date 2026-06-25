@@ -9,8 +9,8 @@
   </head>
     <div id="colorPanel" style="
         position: fixed;
-        top: 20px;
-        right: 20px;
+        top: 10px;
+        right: 10px;
         background: #ffffffee;
         padding: 12px;
         border-radius: 8px;
@@ -39,12 +39,23 @@
 
       <input id="fileInput" type="file" accept=".obj" style="display:none"/>
       <br>
+      <button id="edgeSelectToggle">Select Edges</button>
 
+    </div>
+    <div id="vizPanel" style="
+        position: fixed;
+        top: 370px;
+        right: 10px;
+        background: #ffffffee;
+        padding: 12px;
+        border-radius: 8px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        font-family: sans-serif;
+        z-index: 9999;
+        ">
       <label>Edge Depth Bias</label>
       <br>
       <input id="edgeBias" type="range" min="0.000001" max="0.00015" step="0.000001" value="0.0001">
-
-
     </div>
 
 

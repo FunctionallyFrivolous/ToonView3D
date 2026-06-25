@@ -411,7 +411,7 @@ function initializeModel(obj) {
             );
             child.material.vertexColors = true;
             child.material.transparent = true;
-            child.material.depthWrite = true,
+            child.material.depthWrite = false, // Keep this false in order to avoid the weird transparency cancellation behavior...
             child.material.depthTest = true
 
             edgeStyles.set(child, new Map());

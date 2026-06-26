@@ -27,5 +27,3 @@ let currentModel = null;
 let currentEdgeLayers = [];
 
 let edgeDepthBias = 0.0001;
-
-

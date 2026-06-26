@@ -1,21 +1,12 @@
 // TO DO:
-    // Individual edge selection / painting
-        // Need this for viable workaround for cylinder seam issue
-        //
-    // Paint all faces upon initial load? 
-        // Eliminate weird artifacts in the default state that are not present in painted state...
     // Generate axis line? Offset faces?
     // Snap to ortho views with keys (front/side/top)?
     // High res render Improvements
         // Smooth geometry
     // UI Improvements
-        // Move visualizer settings to separate UI panel (hidden?)
-            // Edge Depth Bias, etc.
-        // Separate panel for selection mode settings
-            // Mesh vs face vs edge selection mode
-            // Multi select?
-        // Style panel
-            // Add buttons for paint vs pick modes (for mobile)
+        // Selection Modes
+            // Add full mesh select
+            // Add multi select?
     // BACK BURNER:
         // SVG export
             // Just need silhouette edges to work right...
@@ -32,6 +23,34 @@ import { mergeVertices } from "https://esm.sh/three@0.164.0/examples/jsm/utils/B
 import { LineMaterial } from "https://esm.sh/three@0.164.0/examples/jsm/lines/LineMaterial.js";
 import { LineSegments2 } from "https://esm.sh/three@0.164.0/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "https://esm.sh/three@0.164.0/examples/jsm/lines/LineSegmentsGeometry.js";
+
+// ------------------------------------------------------------
+// Globals
+// ------------------------------------------------------------
+
+let boundaryEdges = null;
+
+const HIGHLIGHT_LAYER = 2;
+
+let currentSelectedMesh = null;
+let currentSelectedCluster = null;
+
+let currentSelectedEdge = null; // { mesh, cluster, edgeIndex, p1, p2 }
+let edgeHighlightLine = null;   // LineSegments2 for selected edge
+
+const undoStack = [];
+const redoStack = [];
+
+let pickMode = false;
+
+let pointerDown = false;
+let moved = false;
+let downX = 0;
+let downY = 0;
+
+let currentModel = null;
+
+let edgeDepthBias = 0.0001;
 
 // ------------------------------------------------------------
 // Scene setup
@@ -66,9 +85,9 @@ let activeCamera = orthoCamera;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
-// document.body.appendChild(renderer.domElement);
-document.getElementById("viewerContainer").appendChild(renderer.domElement);
+renderer.getContext().getExtension("EXT_frag_depth");
 
+document.getElementById("viewerContainer").appendChild(renderer.domElement);
 
 const controls = new OrbitControls(activeCamera, renderer.domElement);
 controls.enableDamping = true;
@@ -77,7 +96,6 @@ scene.add(new THREE.AmbientLight(0xffffff, 2));
 const dir = new THREE.DirectionalLight(0xffffff, 0.8);
 dir.position.set(5, 5, 5);
 scene.add(dir);
-
 
 // ------------------------------------------------------------
 // Materials
@@ -94,15 +112,13 @@ const defaultFaceMaterial = new THREE.MeshStandardMaterial({
     depthTest: false
 });
 
-
 // ------------------------------------------------------------
 // State
 // ------------------------------------------------------------
 
 const edgeStyles = new WeakMap();          // mesh → Map(clusterIndex → style)
 const persistentEdgeLines = new WeakMap(); // mesh → Map(clusterIndex → LineSegments2)
-
-const edgeOverrides = new WeakMap(); // mesh → Map(edgeIndex → style)
+const edgeOverrides = new WeakMap();       // mesh → Map(clusterIndex → Map(edgeIndex → style))
 
 // ------------------------------------------------------------
 // UI elements
@@ -118,7 +134,6 @@ const edgeDashedInput = document.getElementById("edgeDashed");
 
 const colorPanel = document.getElementById("colorPanel");
 
-
 // ------------------------------------------------------------
 // OBJ loading
 // ------------------------------------------------------------
@@ -126,183 +141,123 @@ const colorPanel = document.getElementById("colorPanel");
 const loader = new OBJLoader();
 
 loader.load("model.obj", (obj) => {
-    initializeModel(obj)
+    initializeModel(obj);
 });
 
-function computeFaceData(geometry) {
-    const index = geometry.index;
-    const pos = geometry.attributes.position;
-    const faceCount = index.count / 3;
+// ------------------------------------------------------------
+// Cluster mesh builder
+// ------------------------------------------------------------
 
-    const centroids = new Array(faceCount);
-    const normals   = new Array(faceCount);
+function buildClusterMesh(parentMesh, cluster) {
+    const srcGeo = parentMesh.geometry;
+    const index = srcGeo.index;
+    const pos = srcGeo.attributes.position;
+    const col = srcGeo.attributes.color;
 
-    const v0 = new THREE.Vector3();
-    const v1 = new THREE.Vector3();
-    const v2 = new THREE.Vector3();
-    const e1 = new THREE.Vector3();
-    const e2 = new THREE.Vector3();
+    const newPositions = [];
+    const newColors = [];
+    const newIndices = [];
 
-    for (let f = 0; f < faceCount; f++) {
-        const i0 = index.getX(f * 3 + 0);
-        const i1 = index.getX(f * 3 + 1);
-        const i2 = index.getX(f * 3 + 2);
+    const vertexMap = new Map();
+    let nextIndex = 0;
 
-        v0.fromBufferAttribute(pos, i0);
-        v1.fromBufferAttribute(pos, i1);
-        v2.fromBufferAttribute(pos, i2);
+    function useVertex(oldIndex) {
+        if (vertexMap.has(oldIndex)) return vertexMap.get(oldIndex);
 
-        const c = new THREE.Vector3()
-            .addVectors(v0, v1)
-            .add(v2)
-            .multiplyScalar(1 / 3);
+        const i = nextIndex++;
+        vertexMap.set(oldIndex, i);
 
-        e1.subVectors(v1, v0);
-        e2.subVectors(v2, v0);
-        const n = new THREE.Vector3().crossVectors(e1, e2).normalize();
+        newPositions.push(
+            pos.getX(oldIndex),
+            pos.getY(oldIndex),
+            pos.getZ(oldIndex)
+        );
 
-        centroids[f] = c;
-        normals[f]   = n;
+        newColors.push(
+            col.getX(oldIndex),
+            col.getY(oldIndex),
+            col.getZ(oldIndex),
+            col.getW(oldIndex)
+        );
+
+        return i;
     }
-
-    return { centroids, normals };
-}
-
-function computePrincipalAxis(centroids, faceIndices) {
-    if (faceIndices.length === 0) return null;
-
-    const mean = new THREE.Vector3();
-    for (const f of faceIndices) {
-        mean.add(centroids[f]);
-    }
-    mean.multiplyScalar(1 / faceIndices.length);
-
-    // Covariance matrix of centroids
-    let xx = 0, xy = 0, xz = 0;
-    let yy = 0, yz = 0, zz = 0;
-
-    for (const f of faceIndices) {
-        const p = centroids[f];
-        const x = p.x - mean.x;
-        const y = p.y - mean.y;
-        const z = p.z - mean.z;
-
-        xx += x * x;
-        xy += x * y;
-        xz += x * z;
-        yy += y * y;
-        yz += y * z;
-        zz += z * z;
-    }
-
-    // Power iteration for dominant eigenvector
-    let v = new THREE.Vector3(1, 0, 0).normalize();
-    for (let iter = 0; iter < 15; iter++) {
-        const x = v.x, y = v.y, z = v.z;
-
-        const nx = xx * x + xy * y + xz * z;
-        const ny = xy * x + yy * y + yz * z;
-        const nz = xz * x + yz * y + zz * z;
-
-        v.set(nx, ny, nz);
-        if (v.lengthSq() === 0) break;
-        v.normalize();
-    }
-
-    return { origin: mean, dir: v.normalize() };
-}
-
-function analyzeClusterAsCylinder(geometry, centroids, normals, cluster) {
-    if (cluster.length < 8) return null; // too small
-
-    const axis = computePrincipalAxis(centroids, cluster);
-    if (!axis) return null;
-
-    const { origin, dir } = axis;
-
-    let radii = [];
-    let normalPerpSum = 0;
-
-    const tmp = new THREE.Vector3();
-    const proj = new THREE.Vector3();
-    const radial = new THREE.Vector3();
 
     for (const f of cluster) {
-        const c = centroids[f];
-        const n = normals[f];
+        const a = index.getX(f * 3 + 0);
+        const b = index.getX(f * 3 + 1);
+        const c = index.getX(f * 3 + 2);
 
-        // distance from axis
-        tmp.subVectors(c, origin);
-        const t = tmp.dot(dir);
-        proj.copy(dir).multiplyScalar(t).add(origin);
-        const r = c.distanceTo(proj);
-        radii.push(r);
+        const na = useVertex(a);
+        const nb = useVertex(b);
+        const nc = useVertex(c);
 
-        // normals perpendicular to axis?
-        const perp = 1 - Math.abs(n.dot(dir));
-        normalPerpSum += perp;
+        newIndices.push(na, nb, nc);
     }
 
-    const avgR = radii.reduce((a,b)=>a+b,0) / radii.length;
-    const varR = radii.reduce((a,r)=>a+(r-avgR)*(r-avgR),0) / radii.length;
-    const normalPerp = normalPerpSum / cluster.length;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(newPositions, 3));
+    geo.setAttribute("color", new THREE.Float32BufferAttribute(newColors, 4));
+    geo.setIndex(newIndices);
+    geo.computeVertexNormals();
 
-    // Cylinder rules
-    if (normalPerp < 0.25) return null;          // normals must be perpendicular
-    if (avgR < 0.05) return null;               // exclude fillets
-    if (varR > avgR * 0.01) return null;        // radius must be consistent
-
-    return {
-        origin,
-        dir,
-        radius: avgR,
-        variance: varR,
-        normalPerp,
-        faces: cluster
-    };
+    return geo;
 }
 
+// ------------------------------------------------------------
+// Model initialization (split into per-cluster meshes)
+// ------------------------------------------------------------
+
 function initializeModel(obj) {
+    const newGroup = new THREE.Group();
+
     obj.traverse((child) => {
-        if (child.isMesh) {
-            child.geometry.deleteAttribute("normal");
-            child.geometry = mergeVertices(child.geometry);
-            child.geometry.computeVertexNormals();
+        if (!child.isMesh) return;
 
-            // child.userData.surfaceClusters = buildSurfaceClusters(
-            //     child.geometry,
-            //     179
-            // );
+        child.geometry = mergeVertices(child.geometry);
+        child.geometry.computeVertexNormals();
 
-            let clusters = buildSurfaceClusters(child.geometry, 179);
-            child.userData.surfaceClusters = clusters;
+        // create color attribute BEFORE clustering/splitting
+        const vertexCount = child.geometry.attributes.position.count;
+        const colors = new Float32Array(vertexCount * 4);
 
-            child.material = defaultFaceMaterial.clone();
+        for (let i = 0; i < vertexCount; i++) {
+            colors[i * 4 + 0] = 0;
+            colors[i * 4 + 1] = 0;
+            colors[i * 4 + 2] = 0;
+            colors[i * 4 + 3] = 0.1;
+        }
 
-            const vertexCount = child.geometry.attributes.position.count;
-            const colors = new Float32Array(vertexCount * 4);
+        child.geometry.setAttribute(
+            "color",
+            new THREE.BufferAttribute(colors, 4)
+        );
 
-            for (let i = 0; i < vertexCount; i++) {
-                colors[i * 4 + 0] = 0;
-                colors[i * 4 + 1] = 0;
-                colors[i * 4 + 2] = 0;
-                colors[i * 4 + 3] = 0.1;
-            }
+        const clusters = buildSurfaceClusters(child.geometry, 179);
 
-            child.geometry.setAttribute(
-                "color",
-                new THREE.BufferAttribute(colors, 4)
-            );
-            child.material.vertexColors = true;
-            child.material.transparent = true;
-            child.material.depthWrite = false, // Keep this false in order to avoid the weird transparency cancellation behavior...
-            child.material.depthTest = true // Keep this true in order to avoid the edge-half-obscured-by-face issue
+        clusters.forEach((cluster, clusterIndex) => {
+            const clusterGeo = buildClusterMesh(child, cluster);
 
-            edgeStyles.set(child, new Map());
-            persistentEdgeLines.set(child, new Map());
+            const mat = defaultFaceMaterial.clone();
+            mat.vertexColors = true;
+            mat.transparent = true;
+            mat.depthTest = true;
+            mat.depthWrite = false;
 
-            edgeOverrides.set(child, new Map());
+            const clusterMesh = new THREE.Mesh(clusterGeo, mat);
 
+            // Local cluster: faces 0..cluster.length-1 in this new geometry
+            const localCluster = Array.from({ length: cluster.length }, (_, i) => i);
+
+            clusterMesh.userData.cluster = localCluster;
+            clusterMesh.userData.clusterIndex = clusterIndex;
+            clusterMesh.userData.parentMesh = child;
+
+            newGroup.add(clusterMesh);
+
+            edgeStyles.set(clusterMesh, new Map());
+            persistentEdgeLines.set(clusterMesh, new Map());
+            edgeOverrides.set(clusterMesh, new Map());
 
             const defaultStyle = {
                 color: new THREE.Color("#000000"),
@@ -311,25 +266,25 @@ function initializeModel(obj) {
                 dashScale: 1
             };
 
-            const meshStyles = edgeStyles.get(child);
-            const meshLines = persistentEdgeLines.get(child);
-
-            child.userData.surfaceClusters.forEach((cluster, clusterIndex) => {
-                meshStyles.set(clusterIndex, {
-                    color: defaultStyle.color.clone(),
-                    width: defaultStyle.width,
-                    dashed: defaultStyle.dashed,
-                    dashScale: defaultStyle.dashScale
-                });
-
-                updatePersistentEdgeLinesForCluster(child, cluster, defaultStyle);
+            edgeStyles.get(clusterMesh).set(clusterIndex, {
+                color: defaultStyle.color.clone(),
+                width: defaultStyle.width,
+                dashed: defaultStyle.dashed,
+                dashScale: defaultStyle.dashScale
             });
-        }
+
+            // IMPORTANT: pass localCluster here, not the original cluster
+            updatePersistentEdgeLinesForCluster(clusterMesh, localCluster, defaultStyle);
+        });
     });
 
-    scene.add(obj);
-    currentModel = obj;
+    scene.add(newGroup);
+    currentModel = newGroup;
 }
+
+// ------------------------------------------------------------
+// Single-edge style override
+// ------------------------------------------------------------
 
 function setSingleEdgeStyle(mesh, clusterIndex, edgeIndex, style) {
     let meshOverrides = edgeOverrides.get(mesh);
@@ -352,10 +307,8 @@ function setSingleEdgeStyle(mesh, clusterIndex, edgeIndex, style) {
     });
 }
 
-
-
 // ------------------------------------------------------------
-// Boundary-only edge extraction (correct logic)
+// Boundary-only edge extraction
 // ------------------------------------------------------------
 
 function getBoundaryEdges(geometry, cluster) {
@@ -401,13 +354,12 @@ function getBoundaryEdges(geometry, cluster) {
 }
 
 // ------------------------------------------------------------
-// Persistent fat-line edges (boundary-only, diagonal-free)
+// Persistent fat-line edges (per-cluster meshes)
 // ------------------------------------------------------------
 
 function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
-    const clusters = mesh.userData.surfaceClusters;
-    const clusterIndex = clusters.indexOf(cluster);
-    if (clusterIndex === -1) return;
+    const clusterIndex = mesh.userData.clusterIndex;
+    if (clusterIndex == null) return;
 
     const meshLines = persistentEdgeLines.get(mesh);
     const meshOverrides = edgeOverrides.get(mesh);
@@ -433,8 +385,8 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
 
         const geo = new LineSegmentsGeometry();
         geo.setPositions([
-            arr[i+0], arr[i+1], arr[i+2],
-            arr[i+3], arr[i+4], arr[i+5]
+            arr[i + 0], arr[i + 1], arr[i + 2],
+            arr[i + 3], arr[i + 4], arr[i + 5]
         ]);
 
         const mat = new LineMaterial({
@@ -461,6 +413,8 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
         line.computeLineDistances();
         line.applyMatrix4(mesh.matrixWorld);
         line.renderOrder = mesh.renderOrder + 1;
+        // line.layers.set(1);
+        // line.raycast = () => {};
 
         scene.add(line);
         newLines.push(line);
@@ -469,13 +423,13 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
     meshLines.set(clusterIndex, newLines);
 }
 
-
 // ------------------------------------------------------------
 // Face painting
 // ------------------------------------------------------------
 
 function paintCluster(mesh, cluster, color, opacity, recordHistory = true) {
-    if (edgeMode) return
+    if (edgeMode) return;
+
     const geo = mesh.geometry;
     const index = geo.index;
     const colors = geo.attributes.color;
@@ -513,6 +467,15 @@ function paintCluster(mesh, cluster, color, opacity, recordHistory = true) {
 
     colors.needsUpdate = true;
 
+    // per-cluster material behavior
+    if (opacity === 1) {
+        mesh.material.transparent = false;
+        mesh.material.depthWrite = true;
+    } else {
+        mesh.material.transparent = true;
+        mesh.material.depthWrite = false;
+    }
+
     if (recordHistory) {
         undoStack.push({
             type: "facePaint",
@@ -527,15 +490,13 @@ function paintCluster(mesh, cluster, color, opacity, recordHistory = true) {
     }
 }
 
-
 // ------------------------------------------------------------
-// Edge painting
+// Edge painting (cluster-level)
 // ------------------------------------------------------------
 
 function paintEdgeStyle(mesh, cluster, style) {
-    const clusters = mesh.userData.surfaceClusters;
-    const clusterIndex = clusters.indexOf(cluster);
-    if (clusterIndex === -1) return;
+    const clusterIndex = mesh.userData.clusterIndex;
+    if (clusterIndex == null) return;
 
     const meshStyles = edgeStyles.get(mesh);
     meshStyles.set(clusterIndex, {
@@ -553,15 +514,13 @@ function paintEdgeStyle(mesh, cluster, style) {
     updatePersistentEdgeLinesForCluster(mesh, cluster, style);
 }
 
-
 // ------------------------------------------------------------
-// Selection highlight (boundary-only, same logic as thick lines)
+// Selection highlight (single edge)
 // ------------------------------------------------------------
 
 let singleEdgeHighlight = null;
 
 function highlightSingleEdge(mesh, cluster, edgeIndex) {
-    // Remove previous highlight
     if (singleEdgeHighlight) {
         scene.remove(singleEdgeHighlight);
         singleEdgeHighlight.geometry.dispose();
@@ -574,8 +533,8 @@ function highlightSingleEdge(mesh, cluster, edgeIndex) {
 
     const i = edgeIndex * 6;
 
-    const p1 = new THREE.Vector3(arr[i+0], arr[i+1], arr[i+2]);
-    const p2 = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]);
+    const p1 = new THREE.Vector3(arr[i + 0], arr[i + 1], arr[i + 2]);
+    const p2 = new THREE.Vector3(arr[i + 3], arr[i + 4], arr[i + 5]);
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute([
@@ -585,7 +544,7 @@ function highlightSingleEdge(mesh, cluster, edgeIndex) {
 
     const mat = new THREE.LineBasicMaterial({
         color: 0xff0000,
-        linewidth: 3
+        linewidth: 5
     });
 
     singleEdgeHighlight = new THREE.LineSegments(geo, mat);
@@ -612,9 +571,8 @@ function applyUIEdgeStyleToSingleEdge() {
         dashScale: parseFloat(edgeDashScaleInput.value)
     };
 
-    const clusters = mesh.userData.surfaceClusters;
-    const clusterIndex = clusters.indexOf(cluster);
-    if (clusterIndex === -1) return;
+    const clusterIndex = mesh.userData.clusterIndex;
+    if (clusterIndex == null) return;
 
     setSingleEdgeStyle(mesh, clusterIndex, edgeIndex, style);
 
@@ -625,6 +583,9 @@ function applyUIEdgeStyleToSingleEdge() {
     highlightSingleEdge(mesh, cluster, edgeIndex);
 }
 
+// ------------------------------------------------------------
+// Geometry helpers
+// ------------------------------------------------------------
 
 function closestPointOnSegment(p, a, b) {
     const ab = new THREE.Vector3().subVectors(b, a);
@@ -633,57 +594,26 @@ function closestPointOnSegment(p, a, b) {
     return new THREE.Vector3().copy(a).addScaledVector(ab, clamped);
 }
 
-function findNearestEdge(mesh, cluster, clickPoint) {
-    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
-    const arr = edgeAttr.array;
-
-    let bestIndex = -1;
-    let bestDist = Infinity;
-
-    for (let i = 0; i < arr.length; i += 6) {
-        const edgeIndex = i / 6;
-
-        const p1 = new THREE.Vector3(arr[i+0], arr[i+1], arr[i+2]).applyMatrix4(mesh.matrixWorld);
-        const p2 = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]).applyMatrix4(mesh.matrixWorld);
-
-        const cp = closestPointOnSegment(clickPoint, p1, p2);
-        const dist = cp.distanceTo(clickPoint);
-
-        if (dist < bestDist) {
-            bestDist = dist;
-            bestIndex = edgeIndex;
-        }
-    }
-
-    return bestIndex;
-}
-
+// ------------------------------------------------------------
+// Highlight face / cluster selection
+// ------------------------------------------------------------
 
 function highlightFace(hit) {
-    // If not in edge mode, selecting a face should clear any selected edge
     if (!edgeMode) {
         deselectEdge();
     }
 
-    const clusters = hit.object.userData.surfaceClusters;
-    if (!clusters) return;
-
-    const faceIndex = hit.faceIndex;
-    if (faceIndex == null) return;
-
-    const cluster = clusters.find((c) => c.includes(faceIndex));
-    
+    const clusterMesh = hit.object;
+    const cluster = clusterMesh.userData.cluster;
     if (!cluster) return;
 
     deselectAllFaces();
 
-    currentSelectedMesh = hit.object;
+    currentSelectedMesh = clusterMesh;
     currentSelectedCluster = cluster;
 
     if (edgeMode) {
-        const mesh = hit.object;
-        const cluster = currentSelectedCluster;
-
+        const mesh = clusterMesh;
         const clickPoint = hit.point.clone();
 
         const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
@@ -695,8 +625,8 @@ function highlightFace(hit) {
         for (let i = 0; i < arr.length; i += 6) {
             const edgeIndex = i / 6;
 
-            const p1 = new THREE.Vector3(arr[i+0], arr[i+1], arr[i+2]).applyMatrix4(mesh.matrixWorld);
-            const p2 = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]).applyMatrix4(mesh.matrixWorld);
+            const p1 = new THREE.Vector3(arr[i + 0], arr[i + 1], arr[i + 2]).applyMatrix4(mesh.matrixWorld);
+            const p2 = new THREE.Vector3(arr[i + 3], arr[i + 4], arr[i + 5]).applyMatrix4(mesh.matrixWorld);
 
             const cp = closestPointOnSegment(clickPoint, p1, p2);
             const dist = cp.distanceTo(clickPoint);
@@ -711,19 +641,17 @@ function highlightFace(hit) {
             highlightSingleEdge(mesh, cluster, bestIndex);
 
             if (pickMode) {
-                // PICK MODE: load edge style into UI, do NOT apply anything
                 loadEdgeStyleIntoUI(mesh, cluster, bestIndex);
             } else {
-                // NORMAL MODE: apply UI style immediately
                 applyUIEdgeStyleToSingleEdge();
             }
         }
         return;
     }
-    
+
     if (pickMode) {
-        loadFacePropertiesFromCluster(hit.object, cluster);
-        loadEdgeStyleIntoUI(hit.object, cluster);
+        loadFacePropertiesFromCluster(clusterMesh, cluster);
+        loadEdgeStyleIntoUI(clusterMesh, cluster);
     }
 
     const color = new THREE.Color(colorInput.value);
@@ -737,11 +665,11 @@ function highlightFace(hit) {
     };
 
     if (!pickMode) {
-        paintCluster(hit.object, cluster, color, opacity);
-        paintEdgeStyle(currentSelectedMesh, currentSelectedCluster, style);
+        paintCluster(clusterMesh, cluster, color, opacity);
+        paintEdgeStyle(clusterMesh, cluster, style);
     }
 
-    const geometry = hit.object.geometry;
+    const geometry = clusterMesh.geometry;
 
     if (boundaryEdges) {
         scene.remove(boundaryEdges);
@@ -763,9 +691,9 @@ function highlightFace(hit) {
 
         boundaryEdges = new THREE.LineSegments(boundaryGeo, boundaryMat);
 
-        boundaryEdges.applyMatrix4(hit.object.matrixWorld);
+        boundaryEdges.applyMatrix4(clusterMesh.matrixWorld);
         boundaryEdges.material.depthTest = false;
-        boundaryEdges.material.depthWrite = false; 
+        boundaryEdges.material.depthWrite = false;
         boundaryEdges.renderOrder = 999;
 
         boundaryEdges.layers.set(HIGHLIGHT_LAYER);
@@ -773,6 +701,10 @@ function highlightFace(hit) {
         boundaryEdges.raycast = () => {};
     }
 }
+
+// ------------------------------------------------------------
+// Deselection
+// ------------------------------------------------------------
 
 function deselectAllFaces() {
     if (boundaryEdges) {
@@ -827,6 +759,15 @@ function undo() {
         });
 
         colors.needsUpdate = true;
+
+        // restore material behavior
+        if (op.newOpacity === 1) {
+            op.mesh.material.transparent = false;
+            op.mesh.material.depthWrite = true;
+        } else {
+            op.mesh.material.transparent = true;
+            op.mesh.material.depthWrite = false;
+        }
     }
 
     if (op.type === "edgeStyle") {
@@ -877,8 +818,8 @@ function loadFacePropertiesFromCluster(mesh, cluster) {
 }
 
 function loadEdgeStyleIntoUI(mesh, cluster, edgeIndex) {
-    const clusters = mesh.userData.surfaceClusters;
-    const clusterIndex = clusters.indexOf(cluster);
+    const clusterIndex = mesh.userData.clusterIndex;
+    if (clusterIndex == null) return;
 
     const meshOverrides = edgeOverrides.get(mesh);
     const clusterOverrides = meshOverrides ? meshOverrides.get(clusterIndex) : null;
@@ -886,7 +827,7 @@ function loadEdgeStyleIntoUI(mesh, cluster, edgeIndex) {
     // If this edge has an override, use it
     const override = clusterOverrides ? clusterOverrides.get(edgeIndex) : null;
 
-    // Otherwise use the cluster style
+    // Otherwise use the cluster-level style
     const clusterStyle = edgeStyles.get(mesh).get(clusterIndex);
     const s = override || clusterStyle;
 
@@ -936,8 +877,6 @@ function applyUIEdgeStyle() {
 
     paintEdgeStyle(currentSelectedMesh, currentSelectedCluster, style);
 }
-
-
 
 edgeColorInput.addEventListener("input", applyUIEdgeStyle);
 edgeWidthInput.addEventListener("input", applyUIEdgeStyle);
@@ -1300,12 +1239,17 @@ faceModeRadio.addEventListener("change", () => {
     if (faceModeRadio.checked) {
         edgeMode = false;
         deselectEdge(); // ensure any edge selection is cleared
+        opacityInput.disabled = false
+        colorInput.disabled = false
     }
 });
 
 edgeModeRadio.addEventListener("change", () => {
     if (edgeModeRadio.checked) {
         edgeMode = true;
+        deselectAllFaces();
+        opacityInput.disabled = true
+        colorInput.disabled = true
     }
 });
 
@@ -1331,172 +1275,197 @@ function exportSVG() {
     const width  = renderer.domElement.width;
     const height = renderer.domElement.height;
 
+    const svgPaths = [];
     const meshes = [];
     currentModel.traverse(o => { if (o.isMesh) meshes.push(o); });
 
-    const svgPaths = [];
+    const emittedClusterSignatures = new Set();
 
-    // ------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------
+    // --- Helpers -------------------------------------------------------------
 
-    function projectToScreen(v) {
-        const p = v.clone().project(activeCamera);
-        return [
-            (p.x * 0.5 + 0.5) * width,
-            (1 - (p.y * 0.5 + 0.5)) * height
-        ];
+    function signedArea2D(pts) {
+        let a = 0;
+        for (let i = 0; i < pts.length; i++) {
+            const [x1, y1] = pts[i];
+            const [x2, y2] = pts[(i + 1) % pts.length];
+            a += (x1 * y2 - x2 * y1);
+        }
+        return 0.5 * a;
     }
 
-    function faceNormalCamSpace(a, b, c, mvMatrix) {
-        const v0 = a.clone().applyMatrix4(mvMatrix);
-        const v1 = b.clone().applyMatrix4(mvMatrix);
-        const v2 = c.clone().applyMatrix4(mvMatrix);
-
-        return v1.sub(v0).cross(v2.sub(v0)).normalize();
+    function centroid(pts) {
+        let x = 0, y = 0;
+        for (const p of pts) { x += p[0]; y += p[1]; }
+        return [x / pts.length, y / pts.length];
     }
 
-    // ------------------------------------------------------------
-    // Main
-    // ------------------------------------------------------------
+    function pointInPolygon(point, poly) {
+        const [px, py] = point;
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const [xi, yi] = poly[i];
+            const [xj, yj] = poly[j];
+            const intersect =
+                ((yi > py) !== (yj > py)) &&
+                (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
+    // --- Main ---------------------------------------------------------------
 
     for (const mesh of meshes) {
         const clusters = mesh.userData.surfaceClusters;
         if (!clusters) continue;
 
         const geo    = mesh.geometry;
-        const pos    = geo.attributes.position;
         const index  = geo.index;
         const colors = geo.attributes.color;
 
-        if (!index) continue;
-
-        const triCount = index.count / 3;
-
-        // Build adjacency: edge → [faceA, faceB]
-        const edgeMap = new Map();
-        function addEdge(a, b, f) {
-            const key = a < b ? `${a}_${b}` : `${b}_${a}`;
-            if (!edgeMap.has(key)) edgeMap.set(key, []);
-            edgeMap.get(key).push(f);
-        }
-
-        for (let f = 0; f < triCount; f++) {
-            const i0 = index.getX(f*3+0);
-            const i1 = index.getX(f*3+1);
-            const i2 = index.getX(f*3+2);
-            addEdge(i0, i1, f);
-            addEdge(i1, i2, f);
-            addEdge(i2, i0, f);
-        }
-
-        // Precompute face normals in camera space
-        const mvMatrix = new THREE.Matrix4()
-            .multiplyMatrices(activeCamera.matrixWorldInverse, mesh.matrixWorld);
-
-        const faceNormals = [];
-        const faceCenters = [];
-
-        for (let f = 0; f < triCount; f++) {
-            const i0 = index.getX(f*3+0);
-            const i1 = index.getX(f*3+1);
-            const i2 = index.getX(f*3+2);
-
-            const v0 = new THREE.Vector3().fromBufferAttribute(pos, i0).applyMatrix4(mesh.matrixWorld);
-            const v1 = new THREE.Vector3().fromBufferAttribute(pos, i1).applyMatrix4(mesh.matrixWorld);
-            const v2 = new THREE.Vector3().fromBufferAttribute(pos, i2).applyMatrix4(mesh.matrixWorld);
-
-            const n = faceNormalCamSpace(
-                new THREE.Vector3().fromBufferAttribute(pos, i0),
-                new THREE.Vector3().fromBufferAttribute(pos, i1),
-                new THREE.Vector3().fromBufferAttribute(pos, i2),
-                mvMatrix
-            );
-
-            faceNormals[f] = n;
-
-            const c = v0.clone().add(v1).add(v2).multiplyScalar(1/3);
-            faceCenters[f] = c;
-        }
-
-        // Determine if face is front-facing
-        const faceFacing = faceNormals.map(n => n.z < 0);
-
-        // For each cluster, collect silhouette edges
         clusters.forEach((cluster, clusterIndex) => {
-            const style = edgeStyles.get(mesh)?.get(clusterIndex);
-            if (!style) return;
+            if (!cluster || cluster.length === 0) return;
 
-            // Face color
+            // --- 1. Face color ------------------------------------------------
             const f0 = cluster[0];
-            const i0 = index.getX(f0*3+0);
+            const i0 = index.getX(f0 * 3 + 0);
+
             const lr = colors.getX(i0);
             const lg = colors.getY(i0);
             const lb = colors.getZ(i0);
             const a  = colors.getW(i0);
 
             const srgb = new THREE.Color(lr, lg, lb).convertLinearToSRGB();
-            const fillColor   = `rgb(${Math.round(srgb.r*255)},${Math.round(srgb.g*255)},${Math.round(srgb.b*255)})`;
+            const fillColor   = `rgb(${Math.round(srgb.r * 255)},${Math.round(srgb.g * 255)},${Math.round(srgb.b * 255)})`;
             const fillOpacity = a;
 
-            const silhouetteSegments = [];
+            // --- 2. Stroke style ---------------------------------------------
+            const style = edgeStyles.get(mesh)?.get(clusterIndex);
+            if (!style) return;
 
-            for (const [key, faces] of edgeMap.entries()) {
-                const [s0, s1] = key.split("_").map(Number);
+            const strokeColor = style.color.clone().convertLinearToSRGB().getStyle();
 
-                const facesInCluster = faces.filter(f => cluster.includes(f));
-                if (facesInCluster.length === 0) continue;
+            // --- 3. Boundary edges -------------------------------------------
+            const edgeAttr = getBoundaryEdges(geo, cluster);
+            if (!edgeAttr || edgeAttr.count === 0) return;
 
-                let isSilhouette = false;
+            const segments = [];
+            for (let i = 0; i < edgeAttr.count; i += 2) {
+                const v1 = new THREE.Vector3(
+                    edgeAttr.array[i*3+0],
+                    edgeAttr.array[i*3+1],
+                    edgeAttr.array[i*3+2]
+                ).applyMatrix4(mesh.matrixWorld);
 
-                if (faces.length === 1) {
-                    // True mesh boundary
-                    isSilhouette = true;
-                } else if (faces.length === 2) {
-                    const [fA, fB] = faces;
-                    const A = faceFacing[fA];
-                    const B = faceFacing[fB];
+                const v2 = new THREE.Vector3(
+                    edgeAttr.array[(i+1)*3+0],
+                    edgeAttr.array[(i+1)*3+1],
+                    edgeAttr.array[(i+1)*3+2]
+                ).applyMatrix4(mesh.matrixWorld);
 
-                    if (facesInCluster.length === 1) {
-                        // Edge between this cluster and some other cluster → feature edge
-                        isSilhouette = true;
-                    } else {
-                        // Both faces in this cluster → true silhouette only if facing differs
-                        if (A !== B) isSilhouette = true;
+                segments.push([v1, v2]);
+            }
+
+            // --- 4. Build ordered loops --------------------------------------
+            let loops = buildOrderedLoops(segments);
+            if (!loops || loops.length === 0) return;
+
+            // --- 5. Deduplicate loops ----------------------------------------
+            const seenLoopSigs = new Set();
+            const uniqueLoops  = [];
+
+            for (const loop of loops) {
+                const sig = loopSignature(loop);
+                if (!seenLoopSigs.has(sig)) {
+                    seenLoopSigs.add(sig);
+                    uniqueLoops.push(loop);
+                }
+            }
+            loops = uniqueLoops;
+            if (loops.length === 0) return;
+
+            // --- 6. Project + classify loops ---------------------------------
+            const loopInfos = [];
+            const clusterGeomSigParts = [];
+
+            for (const loop of loops) {
+                const projected = loop.map(v => {
+                    const p = v.clone().project(activeCamera);
+                    return [
+                        (p.x * 0.5 + 0.5) * width,
+                        (1 - (p.y * 0.5 + 0.5)) * height
+                    ];
+                });
+
+                const area = signedArea2D(projected);
+
+                clusterGeomSigParts.push(
+                    projected
+                        .map(p => `${p[0].toFixed(2)},${p[1].toFixed(2)}`)
+                        .sort()
+                        .join("|")
+                );
+
+                loopInfos.push({ projected, area });
+            }
+
+            // Determine which loops are holes
+            for (const li of loopInfos) {
+                const c = centroid(li.projected);
+                li.isHole = false;
+
+                for (const other of loopInfos) {
+                    if (other === li) continue;
+                    if (Math.abs(other.area) < Math.abs(li.area)) continue;
+                    if (pointInPolygon(c, other.projected)) {
+                        li.isHole = true;
+                        break;
                     }
                 }
-
-                if (isSilhouette) {
-                    const v1 = new THREE.Vector3().fromBufferAttribute(pos, s0).applyMatrix4(mesh.matrixWorld);
-                    const v2 = new THREE.Vector3().fromBufferAttribute(pos, s1).applyMatrix4(mesh.matrixWorld);
-                    silhouetteSegments.push([v1, v2]);
-                }
             }
 
-
-            if (!silhouetteSegments.length) return;
-
-            // Build loops
-            const loops = buildOrderedLoops(silhouetteSegments);
-            if (!loops || !loops.length) return;
-
-            // Project loops
+            // --- 7. Build final path with enforced winding --------------------
             let d = "";
-            for (const loop of loops) {
-                const pts = loop.map(v => projectToScreen(v));
-                d += pts.map((p,i) => (i===0 ? `M ${p[0]},${p[1]}` : `L ${p[0]},${p[1]}`)).join(" ");
-                d += " Z ";
+
+            for (const li of loopInfos) {
+                let pts = li.projected;
+
+                if (!li.isHole) {
+                    // Outer → CCW
+                    if (li.area < 0) pts = pts.slice().reverse();
+                } else {
+                    // Hole → CW
+                    if (li.area > 0) pts = pts.slice().reverse();
+                }
+
+                d += pts.map((p, i) => {
+                    const cmd = (i === 0) ? "M" : "L";
+                    return `${cmd} ${p[0]},${p[1]}`;
+                }).join(" ") + " Z ";
             }
 
-            // Emit path
+            // --- 8. Cluster-level dedupe -------------------------------------
+            const clusterSig = [
+                fillColor,
+                fillOpacity.toFixed(3),
+                strokeColor,
+                style.width.toFixed(3),
+                style.dashed ? style.dashScale.toFixed(3) : "solid",
+                clusterGeomSigParts.sort().join("||")
+            ].join("::");
+
+            if (emittedClusterSignatures.has(clusterSig)) return;
+            emittedClusterSignatures.add(clusterSig);
+
+            // --- 9. Emit path -------------------------------------------------
             svgPaths.push(`
                 <path d="${d}"
                       fill="${fillColor}"
                       fill-opacity="${fillOpacity}"
-                      stroke="${style.color.getStyle()}"
+                      stroke="${strokeColor}"
                       stroke-width="${style.width}"
-                      ${style.dashed ? `stroke-dasharray="${style.dashScale*70}"` : ""}
-                      fill-rule="evenodd"
+                      ${style.dashed ? `stroke-dasharray="${style.dashScale * 70}"` : ""}
+                      fill-rule="nonzero"
                 />
             `);
         });
@@ -1509,6 +1478,12 @@ function exportSVG() {
             ${svgPaths.join("\n")}
         </svg>
     `;
+}
+
+function loopSignature(loop) {
+    const pts = loop.map(v => `${v.x.toFixed(5)},${v.y.toFixed(5)},${v.z.toFixed(5)}`);
+    pts.sort();
+    return pts.join("|");
 }
 
 function buildOrderedLoops(segments) {
@@ -1600,6 +1575,8 @@ document.getElementById("saveSVGButton").addEventListener("click", () => {
 
 document.getElementById("edgeBias").addEventListener("input", (e) => {
     edgeDepthBias = parseFloat(e.target.value);
+    updateAllPersistentEdges();
+
 
     // Rebuild all persistent edge lines with the new bias
     if (currentModel) {
@@ -1617,6 +1594,16 @@ document.getElementById("edgeBias").addEventListener("input", (e) => {
     }
 });
 
+function updateAllPersistentEdges() {
+    scene.traverse(obj => {
+        if (obj.isMesh && obj.userData.cluster) {
+            const cluster = obj.userData.cluster;
+            const clusterIndex = obj.userData.clusterIndex;
+            const style = edgeStyles.get(obj).get(clusterIndex);
+            updatePersistentEdgeLinesForCluster(obj, cluster, style);
+        }
+    });
+}
 
 
 // ------------------------------------------------------------

@@ -52,6 +52,11 @@ let currentModel = null;
 
 let edgeDepthBias = 0.0001;
 
+const globalEdgeMap = new Map();
+// key: "x1,y1,z1|x2,y2,z2"
+// value: array of { mesh, clusterIndex, edgeIndex }
+
+
 // ------------------------------------------------------------
 // Scene setup
 // ------------------------------------------------------------
@@ -203,6 +208,13 @@ function buildClusterMesh(parentMesh, cluster) {
 
     return geo;
 }
+
+function canonicalEdgeKey(p1, p2) {
+    const a = `${p1.x.toFixed(6)},${p1.y.toFixed(6)},${p1.z.toFixed(6)}`;
+    const b = `${p2.x.toFixed(6)},${p2.y.toFixed(6)},${p2.z.toFixed(6)}`;
+    return (a < b) ? `${a}|${b}` : `${b}|${a}`;
+}
+
 
 // ------------------------------------------------------------
 // Model initialization (split into per-cluster meshes)
@@ -365,6 +377,7 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
     const meshOverrides = edgeOverrides.get(mesh);
     const clusterOverrides = meshOverrides ? meshOverrides.get(clusterIndex) : null;
 
+    // Remove existing lines for this cluster
     const existing = meshLines.get(clusterIndex);
     if (existing) {
         existing.forEach(line => {
@@ -372,6 +385,16 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
             line.geometry.dispose();
             line.material.dispose();
         });
+    }
+
+    // Remove existing entries for this mesh+cluster from globalEdgeMap
+    for (const [key, list] of globalEdgeMap.entries()) {
+        const filtered = list.filter(e => !(e.mesh === mesh && e.clusterIndex === clusterIndex));
+        if (filtered.length === 0) {
+            globalEdgeMap.delete(key);
+        } else if (filtered.length !== list.length) {
+            globalEdgeMap.set(key, filtered);
+        }
     }
 
     const newLines = [];
@@ -413,15 +436,26 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
         line.computeLineDistances();
         line.applyMatrix4(mesh.matrixWorld);
         line.renderOrder = mesh.renderOrder + 1;
-        // line.layers.set(1);
-        // line.raycast = () => {};
 
         scene.add(line);
         newLines.push(line);
+
+        // Register this edge in the global twin map (world-space)
+        const p1 = new THREE.Vector3(arr[i + 0], arr[i + 1], arr[i + 2]).applyMatrix4(mesh.matrixWorld);
+        const p2 = new THREE.Vector3(arr[i + 3], arr[i + 4], arr[i + 5]).applyMatrix4(mesh.matrixWorld);
+        const key = canonicalEdgeKey(p1, p2);
+
+        if (!globalEdgeMap.has(key)) globalEdgeMap.set(key, []);
+        globalEdgeMap.get(key).push({
+            mesh,
+            clusterIndex,
+            edgeIndex
+        });
     }
 
     meshLines.set(clusterIndex, newLines);
 }
+
 
 // ------------------------------------------------------------
 // Face painting
@@ -498,6 +532,7 @@ function paintEdgeStyle(mesh, cluster, style) {
     const clusterIndex = mesh.userData.clusterIndex;
     if (clusterIndex == null) return;
 
+    // Update ONLY this cluster's default style
     const meshStyles = edgeStyles.get(mesh);
     meshStyles.set(clusterIndex, {
         color: style.color.clone(),
@@ -506,12 +541,59 @@ function paintEdgeStyle(mesh, cluster, style) {
         dashScale: style.dashScale
     });
 
+    // Clear overrides for THIS cluster only
     const meshOverrides = edgeOverrides.get(mesh);
     if (meshOverrides) {
         meshOverrides.delete(clusterIndex);
     }
 
+    // Rebuild this cluster's persistent lines
     updatePersistentEdgeLinesForCluster(mesh, cluster, style);
+
+    // Now update ONLY the boundary edges of this face
+    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+    const arr = edgeAttr.array;
+
+    for (let i = 0; i < arr.length; i += 6) {
+        const edgeIndex = i / 6;
+
+        // Compute world-space endpoints
+        const p1World = new THREE.Vector3(arr[i + 0], arr[i + 1], arr[i + 2]).applyMatrix4(mesh.matrixWorld);
+        const p2World = new THREE.Vector3(arr[i + 3], arr[i + 4], arr[i + 5]).applyMatrix4(mesh.matrixWorld);
+
+        const key = canonicalEdgeKey(p1World, p2World);
+        const twins = globalEdgeMap.get(key) || [];
+
+        // Apply SINGLE-EDGE override to each twin
+        for (const twin of twins) {
+            // setSingleEdgeStyle(
+            //     twin.mesh,
+            //     twin.clusterIndex,
+            //     twin.edgeIndex,
+            //     style
+            // );
+            if (twin.mesh === mesh && twin.clusterIndex === clusterIndex && twin.edgeIndex === edgeIndex) {
+                continue;
+            }
+
+            setSingleEdgeStyle(twin.mesh, twin.clusterIndex, twin.edgeIndex, {
+                color: style.color.clone(),
+                width: 0,            // HIDE the twin
+                dashed: false,
+                dashScale: style.dashScale,
+            });
+
+            const twinCluster = twin.mesh.userData.cluster;
+            const twinClusterStyle = edgeStyles.get(twin.mesh).get(twin.clusterIndex);
+
+            // Rebuild only the twin cluster's lines
+            updatePersistentEdgeLinesForCluster(
+                twin.mesh,
+                twinCluster,
+                twinClusterStyle
+            );
+        }
+    }
 }
 
 // ------------------------------------------------------------
@@ -533,13 +615,16 @@ function highlightSingleEdge(mesh, cluster, edgeIndex) {
 
     const i = edgeIndex * 6;
 
-    const p1 = new THREE.Vector3(arr[i + 0], arr[i + 1], arr[i + 2]);
-    const p2 = new THREE.Vector3(arr[i + 3], arr[i + 4], arr[i + 5]);
+    const p1Local = new THREE.Vector3(arr[i + 0], arr[i + 1], arr[i + 2]);
+    const p2Local = new THREE.Vector3(arr[i + 3], arr[i + 4], arr[i + 5]);
+
+    const p1World = p1Local.clone().applyMatrix4(mesh.matrixWorld);
+    const p2World = p2Local.clone().applyMatrix4(mesh.matrixWorld);
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute([
-        p1.x, p1.y, p1.z,
-        p2.x, p2.y, p2.z
+        p1World.x, p1World.y, p1World.z,
+        p2World.x, p2World.y, p2World.z
     ], 3));
 
     const mat = new THREE.LineBasicMaterial({
@@ -548,7 +633,6 @@ function highlightSingleEdge(mesh, cluster, edgeIndex) {
     });
 
     singleEdgeHighlight = new THREE.LineSegments(geo, mat);
-    singleEdgeHighlight.applyMatrix4(mesh.matrixWorld);
 
     singleEdgeHighlight.material.depthTest = false;
     singleEdgeHighlight.material.depthWrite = false;
@@ -556,13 +640,21 @@ function highlightSingleEdge(mesh, cluster, edgeIndex) {
 
     scene.add(singleEdgeHighlight);
 
-    currentSelectedEdge = { mesh, cluster, edgeIndex, p1, p2 };
+    currentSelectedEdge = {
+        mesh,
+        cluster,
+        edgeIndex,
+        p1: p1World,
+        p2: p2World
+    };
 }
 
 function applyUIEdgeStyleToSingleEdge() {
     if (!currentSelectedEdge) return;
 
-    const { mesh, cluster, edgeIndex } = currentSelectedEdge;
+    const { mesh, cluster, edgeIndex, p1, p2 } = currentSelectedEdge;
+
+    const clusterIndex = mesh.userData.clusterIndex;
 
     const style = {
         color: new THREE.Color(edgeColorInput.value),
@@ -571,15 +663,38 @@ function applyUIEdgeStyleToSingleEdge() {
         dashScale: parseFloat(edgeDashScaleInput.value)
     };
 
-    const clusterIndex = mesh.userData.clusterIndex;
-    if (clusterIndex == null) return;
+    const key = canonicalEdgeKey(p1, p2);
+    const twins = globalEdgeMap.get(key) || [];
 
-    setSingleEdgeStyle(mesh, clusterIndex, edgeIndex, style);
+    for (const twin of twins) {
+        const twinMesh = twin.mesh;
+        const twinClusterIndex = twin.clusterIndex;
+        const twinEdgeIndex = twin.edgeIndex;
+        
+        if (twin.mesh === mesh && twin.clusterIndex === clusterIndex && twin.edgeIndex === edgeIndex) {
+            continue;
+        }
 
-    const clusterStyle = edgeStyles.get(mesh).get(clusterIndex);
+        // setSingleEdgeStyle(twinMesh, twinClusterIndex, twinEdgeIndex, style);
+        setSingleEdgeStyle(twin.mesh, twin.clusterIndex, twin.edgeIndex, {
+            color: style.color.clone(),
+            width: 0,            // HIDE the twin
+            dashed: false,
+            dashScale: style.dashScale,
+        });
 
-    updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle);
+        setSingleEdgeStyle(mesh, clusterIndex, edgeIndex, style);
 
+        const clusterStyle = edgeStyles.get(mesh).get(clusterIndex);
+        updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle);
+
+        const twinClusterStyle = edgeStyles.get(twinMesh).get(twinClusterIndex);
+        const twinCluster = twinMesh.userData.cluster;
+
+        updatePersistentEdgeLinesForCluster(twinMesh, twinCluster, twinClusterStyle);
+    }
+
+    // Re-highlight the originally selected edge
     highlightSingleEdge(mesh, cluster, edgeIndex);
 }
 
@@ -1576,7 +1691,6 @@ document.getElementById("saveSVGButton").addEventListener("click", () => {
 document.getElementById("edgeBias").addEventListener("input", (e) => {
     edgeDepthBias = parseFloat(e.target.value);
     updateAllPersistentEdges();
-
 
     // Rebuild all persistent edge lines with the new bias
     if (currentModel) {

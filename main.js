@@ -1,12 +1,13 @@
 // TO DO:
     // Generate axis line? Offset faces?
-    // Snap to ortho views with keys (front/side/top)?
+    // Camera Views
+        // Snap to ortho views 
+        // Save camera view
     // High res render Improvements
         // Smooth geometry
     // UI Improvements
         // Selection Modes
-            // Add full mesh select
-            // Add multi select?
+            // Add multi select
     // BACK BURNER:
         // SVG export
             // Just need silhouette edges to work right...
@@ -748,7 +749,7 @@ function highlightFace(hit) {
     };
 
     const clusterMesh = hit.object;
-    const cluster = clusterMesh.userData.cluster;
+    let cluster = clusterMesh.userData.cluster;
     if (!cluster) return;
 
     deselectAllFaces();
@@ -759,6 +760,10 @@ function highlightFace(hit) {
             const parent = clusterMesh.userData.parentMesh;
             paintWholeMesh(parent, color, opacity, style)
         }
+        else {
+            loadFacePropertiesFromCluster(clusterMesh, cluster);
+            loadEdgeStyleIntoUI(clusterMesh, cluster);
+        }
         return;
     }
 
@@ -766,7 +771,7 @@ function highlightFace(hit) {
     currentSelectedCluster = cluster;
 
     if (edgeMode) {
-        const mesh = clusterMesh;
+        let mesh = clusterMesh;
         const clickPoint = hit.point.clone();
 
         const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
@@ -791,6 +796,48 @@ function highlightFace(hit) {
         }
 
         if (bestIndex !== -1) {
+            // --- NEW: Correct selection if hidden edge was picked ---
+            const clusterIndex = mesh.userData.clusterIndex;
+            const meshOverrides = edgeOverrides.get(mesh);
+            const clusterOverrides = meshOverrides ? meshOverrides.get(clusterIndex) : null;
+
+            // Get style of the selected edge
+            const selectedStyle =
+                clusterOverrides && clusterOverrides.get(bestIndex)
+                    ? clusterOverrides.get(bestIndex)
+                    : edgeStyles.get(mesh).get(clusterIndex);
+
+            // If selected edge is hidden, switch to visible twin
+            if (selectedStyle.width === 0) {
+
+                const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+                const arr = edgeAttr.array;
+
+                const i = bestIndex * 6;
+                const p1World = new THREE.Vector3(arr[i], arr[i+1], arr[i+2]).applyMatrix4(mesh.matrixWorld);
+                const p2World = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]).applyMatrix4(mesh.matrixWorld);
+
+                const key = canonicalEdgeKey(p1World, p2World);
+                const twins = globalEdgeMap.get(key) || [];
+
+                for (const twin of twins) {
+                    const twinOverrides = edgeOverrides.get(twin.mesh);
+                    const twinClusterOverrides = twinOverrides ? twinOverrides.get(twin.clusterIndex) : null;
+
+                    const twinStyle =
+                        twinClusterOverrides && twinClusterOverrides.get(twin.edgeIndex)
+                            ? twinClusterOverrides.get(twin.edgeIndex)
+                            : edgeStyles.get(twin.mesh).get(twin.clusterIndex);
+
+                    if (twinStyle.width > 0) {
+                        // Switch selection to visible twin
+                        mesh = twin.mesh;
+                        cluster = twin.mesh.userData.cluster;
+                        bestIndex = twin.edgeIndex;
+                        break;
+                    }
+                }
+            }
             highlightSingleEdge(mesh, cluster, bestIndex);
 
             if (pickMode) {
@@ -1147,6 +1194,7 @@ window.addEventListener("pointermove", (e) => {
 });
 
 window.addEventListener("pointerup", (e) => {
+    deselectAllFaces()
     pointerDown = false;
     if (moved) return;
     if (e.target !== renderer.domElement) return; // ignore clicks outside of canvas

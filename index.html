@@ -34,6 +34,11 @@
     <strong>Selection Mode:</strong><br>
 
     <label>
+      <input type="radio" name="selectMode" id="meshModeRadio" value="mesh">
+      Mesh mode
+    </label>
+    <br>
+    <label>
       <input type="radio" name="selectMode" id="faceModeRadio" value="face" checked>
       Face mode
     </label>
@@ -132,8 +137,8 @@
         position: relative;
         overflow: hidden;
     ">
-        <button id="renderButton">Render High‑Res</button>
-        <button id="saveRenderButton">Save Image</button>
+        <button id="renderButton"; style = "display:auto">Render High‑Res</button>
+        <button id="saveRenderButton"; style = "display:auto">Save Image</button>
         <button id="saveSVGButton">Save SVG</button>
 
         <div id="renderOutputContainer" style="

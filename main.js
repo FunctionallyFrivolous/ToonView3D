@@ -43,6 +43,9 @@ const redoStack = [];
 
 let pickMode = false;
 
+let meshMode = false;
+let edgeMode = false;
+
 let pointerDown = false;
 let moved = false;
 let downX = 0;
@@ -53,8 +56,9 @@ let currentModel = null;
 let edgeDepthBias = 0.0001;
 
 const globalEdgeMap = new Map();
-// key: "x1,y1,z1|x2,y2,z2"
-// value: array of { mesh, clusterIndex, edgeIndex }
+
+const parentToClusters = new WeakMap();
+
 
 
 // ------------------------------------------------------------
@@ -257,6 +261,12 @@ function initializeModel(obj) {
             mat.depthWrite = false;
 
             const clusterMesh = new THREE.Mesh(clusterGeo, mat);
+
+            if (!parentToClusters.has(child)) {
+                parentToClusters.set(child, []);
+            }
+            parentToClusters.get(child).push(clusterMesh);
+
 
             // Local cluster: faces 0..cluster.length-1 in this new geometry
             const localCluster = Array.from({ length: cluster.length }, (_, i) => i);
@@ -596,6 +606,15 @@ function paintEdgeStyle(mesh, cluster, style) {
     }
 }
 
+function paintWholeMesh(parent, color, opacity, edgeStyle) {
+    const clusters = parentToClusters.get(parent);
+    clusters.forEach(cm => {
+        paintCluster(cm, cm.userData.cluster, color, opacity);
+        paintEdgeStyle(cm, cm.userData.cluster, edgeStyle);
+    });
+}
+
+
 // ------------------------------------------------------------
 // Selection highlight (single edge)
 // ------------------------------------------------------------
@@ -718,11 +737,30 @@ function highlightFace(hit) {
         deselectEdge();
     }
 
+    const color = new THREE.Color(colorInput.value);
+    const opacity = parseFloat(opacityInput.value);
+
+    const style = {
+        color: new THREE.Color(edgeColorInput.value),
+        width: parseFloat(edgeWidthInput.value),
+        dashed: edgeDashedInput.checked,
+        dashScale: parseFloat(edgeDashScaleInput.value)
+    };
+
     const clusterMesh = hit.object;
     const cluster = clusterMesh.userData.cluster;
     if (!cluster) return;
 
     deselectAllFaces();
+
+    if (meshMode) {
+        selectWholeMesh(hit.object);
+        if (!pickMode) {
+            const parent = clusterMesh.userData.parentMesh;
+            paintWholeMesh(parent, color, opacity, style)
+        }
+        return;
+    }
 
     currentSelectedMesh = clusterMesh;
     currentSelectedCluster = cluster;
@@ -769,16 +807,6 @@ function highlightFace(hit) {
         loadEdgeStyleIntoUI(clusterMesh, cluster);
     }
 
-    const color = new THREE.Color(colorInput.value);
-    const opacity = parseFloat(opacityInput.value);
-
-    const style = {
-        color: new THREE.Color(edgeColorInput.value),
-        width: parseFloat(edgeWidthInput.value),
-        dashed: edgeDashedInput.checked,
-        dashScale: parseFloat(edgeDashScaleInput.value)
-    };
-
     if (!pickMode) {
         paintCluster(clusterMesh, cluster, color, opacity);
         paintEdgeStyle(clusterMesh, cluster, style);
@@ -796,6 +824,7 @@ function highlightFace(hit) {
     const edgeAttr = getBoundaryEdges(geometry, cluster);
 
     if (edgeAttr.count > 0) {
+        // highlightEdges(clusterMesh, edgeAttr)
         const boundaryGeo = new THREE.BufferGeometry();
         boundaryGeo.setAttribute("position", edgeAttr);
 
@@ -817,16 +846,93 @@ function highlightFace(hit) {
     }
 }
 
+let meshHighlights = [];
+
+function selectWholeMesh(clusterMesh) {
+    deselectAllFaces();
+
+    const parent = clusterMesh.userData.parentMesh;
+    if (!parent) return;
+
+    const clusters = parentToClusters.get(parent);
+    if (!clusters) return;
+
+    meshHighlights = [];
+
+    // Highlight all boundary edges for all clusters
+    clusters.forEach(cm => {
+        const cluster = cm.userData.cluster;
+
+        const edgeAttr = getBoundaryEdges(cm.geometry, cluster);
+        if (edgeAttr.count === 0) return;
+
+        const boundaryGeo = new THREE.BufferGeometry();
+        boundaryGeo.setAttribute("position", edgeAttr);
+
+        const boundaryMat = new THREE.LineBasicMaterial({
+            color: 0xff0000,
+            linewidth: 1
+        });
+
+        const boundary = new THREE.LineSegments(boundaryGeo, boundaryMat);
+        boundary.applyMatrix4(cm.matrixWorld);
+        boundary.material.depthTest = false;
+        boundary.material.depthWrite = false;
+        boundary.renderOrder = 999;
+
+        scene.add(boundary);
+
+        // highlightEdges(clusterMesh, edgeAttr)
+        meshHighlights.push(boundary);
+    });
+
+    // Store selection state
+    currentSelectedMesh = parent;
+    currentSelectedCluster = null;
+    currentSelectedEdge = null;
+}
+
+function highlightEdges(clusterMesh, edgeAttr){
+    const boundaryGeo = new THREE.BufferGeometry();
+    boundaryGeo.setAttribute("position", edgeAttr);
+
+    const boundaryMat = new THREE.LineBasicMaterial({
+        color: 0xff0000,
+        linewidth: 1
+    });
+
+    boundaryEdges = new THREE.LineSegments(boundaryGeo, boundaryMat);
+
+    if (clusterMesh) boundaryEdges.applyMatrix4(clusterMesh.matrixWorld);
+    boundaryEdges.material.depthTest = false;
+    boundaryEdges.material.depthWrite = false;
+    boundaryEdges.renderOrder = 999;
+
+    boundaryEdges.layers.set(HIGHLIGHT_LAYER);
+    scene.add(boundaryEdges);
+    boundaryEdges.raycast = () => {};
+}
+
 // ------------------------------------------------------------
 // Deselection
 // ------------------------------------------------------------
 
 function deselectAllFaces() {
+    
     if (boundaryEdges) {
         scene.remove(boundaryEdges);
         boundaryEdges.geometry.dispose();
         boundaryEdges.material.dispose();
         boundaryEdges = null;
+    }
+
+    if (meshHighlights.length > 0) {
+        meshHighlights.forEach(h => {
+            scene.remove(h);
+            h.geometry.dispose();
+            h.material.dispose();
+        });
+        meshHighlights = [];
     }
 
     currentSelectedMesh = null;
@@ -952,45 +1058,62 @@ function loadEdgeStyleIntoUI(mesh, cluster, edgeIndex) {
     edgeDashScaleInput.value = s.dashScale;
 }
 
-
-
 // ------------------------------------------------------------
 // UI event wiring
 // ------------------------------------------------------------
 
 function applyUIFacePaint() {
-    if (!currentSelectedMesh || !currentSelectedCluster) return;
 
     const color = new THREE.Color(colorInput.value);
     const opacity = parseFloat(opacityInput.value);
 
-    paintCluster(currentSelectedMesh, currentSelectedCluster, color, opacity);
+    if (meshMode) {
+        const clusters = parentToClusters.get(currentSelectedMesh);
+        if (!clusters) return;
+        clusters.forEach(cm => {
+            paintCluster(cm, cm.userData.cluster, color, opacity);
+            // paintEdgeStyle(cm, cm.userData.cluster, style);
+        });
+    } 
+    else {
+        if (!currentSelectedMesh || !currentSelectedCluster) return;
+        paintCluster(currentSelectedMesh, currentSelectedCluster, color, opacity);
+    }
 }
 
 colorInput.addEventListener("input", applyUIFacePaint);
 opacityInput.addEventListener("input", applyUIFacePaint);
 
 function applyUIEdgeStyle() {
-    // If a single edge is selected → only update that edge
-    if (currentSelectedEdge) {
-        applyUIEdgeStyleToSingleEdge();
-        return;
-    }
-
-    // If no face is selected → do nothing
-    if (!currentSelectedMesh || !currentSelectedCluster) {
-        return;
-    }
-
-    // Otherwise apply cluster-level style
     const style = {
         color: new THREE.Color(edgeColorInput.value),
         width: parseFloat(edgeWidthInput.value),
         dashed: edgeDashedInput.checked,
         dashScale: parseFloat(edgeDashScaleInput.value)
     };
+    
+    if (meshMode) {
+        const clusters = parentToClusters.get(currentSelectedMesh);
+        if (!clusters) return;
+        clusters.forEach(cm => {
+            // paintCluster(cm, cm.userData.cluster, color, opacity);
+            paintEdgeStyle(cm, cm.userData.cluster, style);
+        });
+    } 
+    else {
+        // If a single edge is selected → only update that edge
+        if (currentSelectedEdge) {
+            applyUIEdgeStyleToSingleEdge();
+            return;
+        }
 
-    paintEdgeStyle(currentSelectedMesh, currentSelectedCluster, style);
+        // If no face is selected → do nothing
+        if (!currentSelectedMesh || !currentSelectedCluster) {
+            return;
+        }
+
+        paintEdgeStyle(currentSelectedMesh, currentSelectedCluster, style);
+    }
 }
 
 edgeColorInput.addEventListener("input", applyUIEdgeStyle);
@@ -1028,8 +1151,12 @@ window.addEventListener("pointerup", (e) => {
     if (moved) return;
     if (e.target !== renderer.domElement) return; // ignore clicks outside of canvas
 
-    mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    // mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+    // mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    const rect = renderer.domElement.getBoundingClientRect();
+
+    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
     raycaster.setFromCamera(mouse, activeCamera);
 
@@ -1307,6 +1434,8 @@ const SNAPSHOT_SCALE = 2;
 document.getElementById("renderButton").addEventListener("click", () => {
     if (!currentModel) return;
 
+    deselectAllFaces()
+
     // Compute target resolution
     const w = renderer.domElement.width * SNAPSHOT_SCALE;
     const h = renderer.domElement.height * SNAPSHOT_SCALE;
@@ -1337,8 +1466,6 @@ document.getElementById("saveRenderButton").addEventListener("click", () => {
     a.click();
 });
 
-let edgeMode = false;
-
 window.addEventListener("keydown", (e) => {
     if (e.key === "e") edgeMode = true;
 });
@@ -1349,11 +1476,14 @@ window.addEventListener("keyup", (e) => {
 
 const faceModeRadio = document.getElementById("faceModeRadio");
 const edgeModeRadio = document.getElementById("edgeModeRadio");
+const meshModeRadio = document.getElementById("meshModeRadio");
 
 faceModeRadio.addEventListener("change", () => {
     if (faceModeRadio.checked) {
         edgeMode = false;
-        deselectEdge(); // ensure any edge selection is cleared
+        meshMode = false;
+        deselectAllFaces();
+        deselectEdge();
         opacityInput.disabled = false
         colorInput.disabled = false
     }
@@ -1362,9 +1492,20 @@ faceModeRadio.addEventListener("change", () => {
 edgeModeRadio.addEventListener("change", () => {
     if (edgeModeRadio.checked) {
         edgeMode = true;
+        meshMode = false;
         deselectAllFaces();
         opacityInput.disabled = true
         colorInput.disabled = true
+    }
+});
+
+meshModeRadio.addEventListener("change", () => {
+    if (meshModeRadio.checked) {
+        meshMode = true;
+        edgeMode = false;
+        deselectAllFaces();
+        opacityInput.disabled = false
+        colorInput.disabled = false
     }
 });
 
@@ -1382,6 +1523,7 @@ pickModeRadio.addEventListener("change", () => {
         pickMode = true;
     }
 });
+
 
 //
 function exportSVG() {
@@ -1728,5 +1870,28 @@ function animate() {
     requestAnimationFrame(animate);
     controls.update();
     renderer.render(scene, activeCamera);
+
+    // // Uncomment below to enable live high-res render
+
+    // if (!currentModel) return;
+
+    // // Compute target resolution
+    // const w = renderer.domElement.width * SNAPSHOT_SCALE;
+    // const h = renderer.domElement.height * SNAPSHOT_SCALE;
+
+    // snapshotRenderer.setSize(w, h, false);
+
+    // // Render scene using the active camera
+    // snapshotRenderer.render(scene, activeCamera);
+
+    // // Convert to PNG
+    // const dataURL = snapshotRenderer.domElement.toDataURL("image/png");
+
+    // // Display in preview box
+    // const img = document.getElementById("renderOutput");
+    // img.src = dataURL;
+
+    // // Store for saving
+    // window.lastRenderDataURL = dataURL;
 }
 animate();

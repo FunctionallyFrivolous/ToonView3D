@@ -31,21 +31,19 @@
         font-family: sans-serif;
         z-index: 10000;
       ">
-    <strong>Selection Mode:</strong><br>
+    <strong>Selection Scope:</strong><br>
 
     <label>
-      <input type="radio" name="selectMode" id="meshModeRadio" value="mesh">
-      Mesh mode
+      <input type="radio" name="selectMode" id="select3DRadio" value="3D">
+      3D
     </label>
-    <br>
     <label>
-      <input type="radio" name="selectMode" id="faceModeRadio" value="face" checked>
-      Face mode
+      <input type="radio" name="selectMode" id="select2DRadio" value="2D" checked>
+      2D
     </label>
-    <br>
     <label>
-      <input type="radio" name="selectMode" id="edgeModeRadio" value="edge">
-      Edge mode
+      <input type="radio" name="selectMode" id="select1DRadio" value="1D">
+      1D
     </label>
   </div>
 
@@ -61,17 +59,27 @@
         font-family: sans-serif;
         z-index: 9999;
         ">
-        <strong>Style Mode:</strong><br>
+    <strong>Edit Scope:</strong><br>
+    <label>
+      <input type="checkbox" name="styleMode" id="faceModeRadio" value="face" checked>
+      Faces
+    </label>
+    <label>
+      <input type="checkbox" name="styleMode" id="edgeModeRadio" value="edge" checked>
+      Edges
+    </label>
+    <!-- <br>
+    <br>
+    <strong>Style Mode:</strong><br>
 
     <label>
-      <input type="radio" name="styleMode" id="paintModeRadio" value="face" checked>
-      Paint mode
+      <input type="radio" name="styleMode" id="paintModeRadio" value="paint">
+      Paint
     </label>
-    <br>
     <label>
-      <input type="radio" name="styleMode" id="pickModeRadio" value="edge">
-      Pick mode
-    </label>
+      <input type="radio" name="styleMode" id="pickModeRadio" value="pick" checked>
+      Pick
+    </label> -->
     <hr>
         <strong>Face Color:</strong><br>
         <input type="color" id="faceColor" value="#ff8800"><br><br>

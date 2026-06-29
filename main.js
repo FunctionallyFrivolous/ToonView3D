@@ -42,10 +42,9 @@ let edgeHighlightLine = null;   // LineSegments2 for selected edge
 const undoStack = [];
 const redoStack = [];
 
-let pickMode = false;
-
-let meshMode = false;
-let edgeMode = false;
+let selectScope = "2D"
+let editFaces = true
+let editEdges = true 
 
 let pointerDown = false;
 let moved = false;
@@ -473,7 +472,9 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
 // ------------------------------------------------------------
 
 function paintCluster(mesh, cluster, color, opacity, recordHistory = true) {
-    if (edgeMode) return;
+    console.log(editFaces)
+    if (selectScope === "1D") return;
+    if (!editFaces) return
 
     const geo = mesh.geometry;
     const index = geo.index;
@@ -540,6 +541,7 @@ function paintCluster(mesh, cluster, color, opacity, recordHistory = true) {
 // ------------------------------------------------------------
 
 function paintEdgeStyle(mesh, cluster, style) {
+    if (!editEdges) return
     const clusterIndex = mesh.userData.clusterIndex;
     if (clusterIndex == null) return;
 
@@ -734,7 +736,7 @@ function closestPointOnSegment(p, a, b) {
 // ------------------------------------------------------------
 
 function highlightFace(hit) {
-    if (!edgeMode) {
+    if (selectScope !== "1D") {
         deselectEdge();
     }
 
@@ -754,23 +756,20 @@ function highlightFace(hit) {
 
     deselectAllFaces();
 
-    if (meshMode) {
+    if (selectScope === "3D") {
         selectWholeMesh(hit.object);
-        if (!pickMode) {
-            const parent = clusterMesh.userData.parentMesh;
-            paintWholeMesh(parent, color, opacity, style)
-        }
-        else {
-            loadFacePropertiesFromCluster(clusterMesh, cluster);
-            loadEdgeStyleIntoUI(clusterMesh, cluster);
-        }
+        const parent = clusterMesh.userData.parentMesh;
+        paintWholeMesh(parent, color, opacity, style)
+
+        loadFacePropertiesFromCluster(clusterMesh, cluster);
+        loadEdgeStyleIntoUI(clusterMesh, cluster);
         return;
     }
 
     currentSelectedMesh = clusterMesh;
     currentSelectedCluster = cluster;
 
-    if (edgeMode) {
+    if (selectScope === "1D") {
         let mesh = clusterMesh;
         const clickPoint = hit.point.clone();
 
@@ -840,24 +839,17 @@ function highlightFace(hit) {
             }
             highlightSingleEdge(mesh, cluster, bestIndex);
 
-            if (pickMode) {
-                loadEdgeStyleIntoUI(mesh, cluster, bestIndex);
-            } else {
-                applyUIEdgeStyleToSingleEdge();
-            }
+            if (editEdges) applyUIEdgeStyleToSingleEdge();
+            else loadEdgeStyleIntoUI(mesh, cluster, bestIndex); 
         }
         return;
     }
 
-    if (pickMode) {
-        loadFacePropertiesFromCluster(clusterMesh, cluster);
-        loadEdgeStyleIntoUI(clusterMesh, cluster);
-    }
+    if (!editFaces) loadFacePropertiesFromCluster(clusterMesh, cluster);
+    if (!editEdges) loadEdgeStyleIntoUI(clusterMesh, cluster);
 
-    if (!pickMode) {
-        paintCluster(clusterMesh, cluster, color, opacity);
-        paintEdgeStyle(clusterMesh, cluster, style);
-    }
+    paintCluster(clusterMesh, cluster, color, opacity);
+    paintEdgeStyle(clusterMesh, cluster, style);
 
     const geometry = clusterMesh.geometry;
 
@@ -1114,7 +1106,7 @@ function applyUIFacePaint() {
     const color = new THREE.Color(colorInput.value);
     const opacity = parseFloat(opacityInput.value);
 
-    if (meshMode) {
+    if (selectScope === "3D") {
         const clusters = parentToClusters.get(currentSelectedMesh);
         if (!clusters) return;
         clusters.forEach(cm => {
@@ -1139,7 +1131,7 @@ function applyUIEdgeStyle() {
         dashScale: parseFloat(edgeDashScaleInput.value)
     };
     
-    if (meshMode) {
+    if (selectScope === "3D") {
         const clusters = parentToClusters.get(currentSelectedMesh);
         if (!clusters) return;
         clusters.forEach(cm => {
@@ -1223,12 +1215,11 @@ window.addEventListener("pointerup", (e) => {
 window.addEventListener("keydown", (e) => {
     if (e.ctrlKey && e.key === "z") undo();
     if (e.ctrlKey && e.key === "y") redo();
-    if (e.key === "p") pickMode = true;
     if (e.key === "Escape") deselectAllFaces();
 });
 
 window.addEventListener("keyup", (e) => {
-    if (e.key === "p") pickMode = false;
+    // if (e.key === "p") pickMode = false;
 });
 
 
@@ -1515,63 +1506,99 @@ document.getElementById("saveRenderButton").addEventListener("click", () => {
 });
 
 window.addEventListener("keydown", (e) => {
-    if (e.key === "e") edgeMode = true;
+    if (e.key === "e") selectScope = "1D";
 });
 
 window.addEventListener("keyup", (e) => {
-    if (e.key === "e") edgeMode = false;
+    if (e.key === "e") selectScope = "2D";
 });
 
-const faceModeRadio = document.getElementById("faceModeRadio");
-const edgeModeRadio = document.getElementById("edgeModeRadio");
-const meshModeRadio = document.getElementById("meshModeRadio");
+const select3DRadio = document.getElementById("select3DRadio");
+const select2DRadio = document.getElementById("select2DRadio");
+const select1DRadio = document.getElementById("select1DRadio");
 
-faceModeRadio.addEventListener("change", () => {
-    if (faceModeRadio.checked) {
-        edgeMode = false;
-        meshMode = false;
+select3DRadio.addEventListener("change", () => {
+    if (select3DRadio.checked) {
+        selectScope = "3D";
+        deselectAllFaces();
+
+        opacityInput.disabled = editFaces ? false : true
+        colorInput.disabled = editFaces ? false : true
+
+        edgeColorInput.disabled = editEdges ? false : true
+        edgeWidthInput.disabled = editEdges ? false : true
+        edgeDashScaleInput.disabled = editEdges ? false : true
+        edgeDashedInput.disabled = editEdges ? false : true
+
+        faceModeCB.disabled = false
+    }
+});
+select2DRadio.addEventListener("change", () => {
+    if (select2DRadio.checked) {
+        selectScope = "2D";
         deselectAllFaces();
         deselectEdge();
-        opacityInput.disabled = false
-        colorInput.disabled = false
+
+        opacityInput.disabled = editFaces ? false : true
+        colorInput.disabled = editFaces ? false : true
+
+        edgeColorInput.disabled = editEdges ? false : true
+        edgeWidthInput.disabled = editEdges ? false : true
+        edgeDashScaleInput.disabled = editEdges ? false : true
+        edgeDashedInput.disabled = editEdges ? false : true
+
+        faceModeCB.disabled = false
+    }
+});
+select1DRadio.addEventListener("change", () => {
+    if (select1DRadio.checked) {
+        selectScope = "1D";
+        deselectAllFaces();
+
+        opacityInput.disabled = true
+        colorInput.disabled = true
+
+        edgeColorInput.disabled = editEdges ? false : true
+        edgeWidthInput.disabled = editEdges ? false : true
+        edgeDashScaleInput.disabled = editEdges ? false : true
+        edgeDashedInput.disabled = editEdges ? false : true
+
+        faceModeCB.disabled = true
     }
 });
 
-edgeModeRadio.addEventListener("change", () => {
-    if (edgeModeRadio.checked) {
-        edgeMode = true;
-        meshMode = false;
-        deselectAllFaces();
+const faceModeCB = document.getElementById("faceModeRadio");
+const edgeModeCB = document.getElementById("edgeModeRadio");
+
+faceModeCB.addEventListener("change", () => {
+    // if (!faceModeCB.checked && !edgeModeCB.checked) faceModeCB.checked = true
+    if (faceModeCB.checked) {
+        editFaces = true
+        opacityInput.disabled = false
+        colorInput.disabled = false
+    } else {
+        editFaces = false
         opacityInput.disabled = true
         colorInput.disabled = true
     }
 });
 
-meshModeRadio.addEventListener("change", () => {
-    if (meshModeRadio.checked) {
-        meshMode = true;
-        edgeMode = false;
-        deselectAllFaces();
-        opacityInput.disabled = false
-        colorInput.disabled = false
+edgeModeCB.addEventListener("change", () => {
+    // if (!faceModeCB.checked && !edgeModeCB.checked) edgeModeCB.checked = true
+    if (edgeModeCB.checked) {
+        editEdges = true
+        edgeColorInput.disabled = false
+        edgeWidthInput.disabled = false
+        edgeDashScaleInput.disabled = false
+        edgeDashedInput.disabled = false
+    } else {
+        editEdges = false
+        edgeColorInput.disabled = true
+        edgeWidthInput.disabled = true
+        edgeDashScaleInput.disabled = true
+        edgeDashedInput.disabled = true
     }
 });
-
-const paintModeRadio = document.getElementById("paintModeRadio");
-const pickModeRadio = document.getElementById("pickModeRadio");
-
-paintModeRadio.addEventListener("change", () => {
-    if (paintModeRadio.checked) {
-        pickMode = false;
-    }
-});
-
-pickModeRadio.addEventListener("change", () => {
-    if (pickModeRadio.checked) {
-        pickMode = true;
-    }
-});
-
 
 //
 function exportSVG() {

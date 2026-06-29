@@ -1194,10 +1194,10 @@ window.addEventListener("pointermove", (e) => {
 });
 
 window.addEventListener("pointerup", (e) => {
-    deselectAllFaces()
     pointerDown = false;
     if (moved) return;
     if (e.target !== renderer.domElement) return; // ignore clicks outside of canvas
+    deselectAllFaces()
 
     // mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
     // mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;

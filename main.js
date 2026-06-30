@@ -69,7 +69,8 @@ const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xffffff);
+// scene.background = new THREE.Color(0xffffff);
+scene.background = null;
 
 const camera = new THREE.PerspectiveCamera(
     45,
@@ -92,7 +93,14 @@ orthoCamera.lookAt(0, 0, 0);
 
 let activeCamera = orthoCamera;
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({
+    antialias: true,
+    alpha: true,        // <‑‑ critical
+    // preserveDrawingBuffer: true  // <‑‑ required for toDataURL()
+});
+renderer.setClearColor(0x000000, 0);   // transparent black
+
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.getContext().getExtension("EXT_frag_depth");
 
@@ -132,6 +140,7 @@ const edgeOverrides = new WeakMap();       // mesh → Map(clusterIndex → Map(
 // ------------------------------------------------------------
 // UI elements
 // ------------------------------------------------------------
+const backgroundColor = document.getElementById("bgColor");
 
 const colorInput = document.getElementById("faceColor");
 const opacityInput = document.getElementById("faceOpacity");
@@ -142,6 +151,10 @@ const edgeDashScaleInput = document.getElementById("edgeDashScale");
 const edgeDashedInput = document.getElementById("edgeDashed");
 
 const colorPanel = document.getElementById("colorPanel");
+
+backgroundColor.addEventListener("input", () => {
+    scene.background = new THREE.Color(backgroundColor.value)
+});
 
 // ------------------------------------------------------------
 // OBJ loading
@@ -472,7 +485,6 @@ function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
 // ------------------------------------------------------------
 
 function paintCluster(mesh, cluster, color, opacity, recordHistory = true) {
-    console.log(editFaces)
     if (selectScope === "1D") return;
     if (!editFaces) return
 
@@ -1463,7 +1475,12 @@ function loadOBJFromString(objText, name = "model.obj") {
 // High‑Resolution Snapshot Renderer
 // ------------------------------------------------------------
 
-const snapshotRenderer = new THREE.WebGLRenderer({ antialias: true });
+// const snapshotRenderer = new THREE.WebGLRenderer({ antialias: true });
+const snapshotRenderer = new THREE.WebGLRenderer({
+    antialias: true,
+    alpha: true,        // <‑‑ critical
+    preserveDrawingBuffer: true  // <‑‑ required for toDataURL()
+});
 snapshotRenderer.setPixelRatio(1); // we control resolution manually
 
 // How many times bigger than the live view?
@@ -1474,6 +1491,9 @@ document.getElementById("renderButton").addEventListener("click", () => {
     if (!currentModel) return;
 
     deselectAllFaces()
+
+    const transBackground = document.getElementById("transBG");
+    if (transBackground.checked) scene.background = null;
 
     // Compute target resolution
     const w = renderer.domElement.width * SNAPSHOT_SCALE;
@@ -1493,6 +1513,8 @@ document.getElementById("renderButton").addEventListener("click", () => {
 
     // Store for saving
     window.lastRenderDataURL = dataURL;
+    
+    scene.background = new THREE.Color(backgroundColor.value)
 });
 
 // Save button

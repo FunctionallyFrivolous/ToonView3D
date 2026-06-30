@@ -18,7 +18,6 @@
     gap: 10px;
     z-index: 9999;
 ">
-  <!-- MODE PANEL -->
   <div id="modePanel" style="
         /* position: fixed;
         top: 10px;
@@ -32,7 +31,6 @@
         z-index: 10000;
       ">
     <strong>Selection Scope:</strong><br>
-
     <label>
       <input type="radio" name="selectMode" id="select3DRadio" value="3D">
       3D
@@ -45,6 +43,17 @@
       <input type="radio" name="selectMode" id="select1DRadio" value="1D">
       1D
     </label>
+    <hr>
+    <strong>Edit Scope:</strong><br>
+    <label>
+      <input type="checkbox" name="styleMode" id="faceModeRadio" value="face" checked>
+      Faces
+    </label>
+    <label>
+      <input type="checkbox" name="styleMode" id="edgeModeRadio" value="edge" checked>
+      Edges
+    </label>
+    
   </div>
 
   <div id="colorPanel" style="
@@ -59,50 +68,28 @@
         font-family: sans-serif;
         z-index: 9999;
         ">
-    <strong>Edit Scope:</strong><br>
-    <label>
-      <input type="checkbox" name="styleMode" id="faceModeRadio" value="face" checked>
-      Faces
-    </label>
-    <label>
-      <input type="checkbox" name="styleMode" id="edgeModeRadio" value="edge" checked>
-      Edges
-    </label>
-    <!-- <br>
-    <br>
-    <strong>Style Mode:</strong><br>
+    <strong>Face Color:</strong><br>
+    <input type="color" id="faceColor" value="#ff8800"><br><br>
 
-    <label>
-      <input type="radio" name="styleMode" id="paintModeRadio" value="paint">
-      Paint
-    </label>
-    <label>
-      <input type="radio" name="styleMode" id="pickModeRadio" value="pick" checked>
-      Pick
-    </label> -->
+    <strong>Opacity:</strong><br>
+    <input type="range" id="faceOpacity" min="0" max="1" step="0.01" value="0.6">
+    
     <hr>
-        <strong>Face Color:</strong><br>
-        <input type="color" id="faceColor" value="#ff8800"><br><br>
 
-        <strong>Opacity:</strong><br>
-        <input type="range" id="faceOpacity" min="0" max="1" step="0.01" value="0.6">
-        
-        <hr>
+    <strong>Edge Color:</strong><br>
+    <input type="color" id="edgeColor" value="#000000"><br><br>
 
-        <strong>Edge Color:</strong><br>
-        <input type="color" id="edgeColor" value="#000000"><br><br>
+    <strong>Edge Width:</strong><br>
+    <input type="range" id="edgeWidth" min="0" max="5" step="0.5" value="1"><br><br>
 
-        <strong>Edge Width:</strong><br>
-        <input type="range" id="edgeWidth" min="0" max="5" step="0.5" value="1"><br><br>
+    <strong><input type="checkbox" id="edgeDashed"> Dashed:</strong>
+    <br>
+    <input id="edgeDashScale" type="range" min="0.05" max="0.25" step="0.01" value="0.1">
+    <br>
 
-        <strong><input type="checkbox" id="edgeDashed"> Dashed:</strong>
-        <br>
-        <input id="edgeDashScale" type="range" min="0.05" max="0.25" step="0.01" value="0.1">
-        <br>
+  <input id="fileInput" type="file" accept=".obj" style="display:none"/>
 
-      <input id="fileInput" type="file" accept=".obj" style="display:none"/>
-
-    </div>
+  </div>
 
     <div id="vizPanel" style="
         /* position: fixed;
@@ -116,12 +103,20 @@
         font-family: sans-serif;
         z-index: 9999;
         ">
+      <strong>Background:</strong><br>
+      <input type="color" id="bgColor" value="#ffffff">
+      <br>
+      <label>
+        <input type="checkbox" id="transBG">
+        Transparent
+      </label>
+      <hr>
       <strong>Edge Depth Bias:</strong>
       <br>
       <input id="edgeBias" type="range" min="0.000001" max="0.00015" step="0.000001" value="0.0001">
     </div>
 
-    </div>
+  </div>
 
   <body>
     <!-- LIVE VIEWER CONTAINER -->

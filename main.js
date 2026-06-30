@@ -10,7 +10,7 @@
             // Add multi select
     // BACK BURNER:
         // SVG export
-            // Just need silhouette edges to work right...
+            // Just need silhouette edges to work right... 
 
 // ------------------------------------------------------------
 // Imports
@@ -1513,7 +1513,7 @@ document.getElementById("renderButton").addEventListener("click", () => {
 
     // Store for saving
     window.lastRenderDataURL = dataURL;
-    
+
     scene.background = new THREE.Color(backgroundColor.value)
 });
 

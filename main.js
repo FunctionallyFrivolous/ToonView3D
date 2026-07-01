@@ -601,12 +601,29 @@ function paintEdgeStyle(mesh, cluster, style) {
                 continue;
             }
 
-            setSingleEdgeStyle(twin.mesh, twin.clusterIndex, twin.edgeIndex, {
-                color: style.color.clone(),
-                width: 0,            // HIDE the twin
-                dashed: false,
-                dashScale: style.dashScale,
-            });
+            // setSingleEdgeStyle(twin.mesh, twin.clusterIndex, twin.edgeIndex, {
+            //     color: style.color.clone(),
+            //     width: 0,            // HIDE the twin
+            //     dashed: false,
+            //     dashScale: style.dashScale,
+            // });
+            if (style.dashed) {
+                // Hide twin when dashed
+                setSingleEdgeStyle(twin.mesh, twin.clusterIndex, twin.edgeIndex, {
+                    color: style.color.clone(),
+                    width: 0,
+                    dashed: false,
+                    dashScale: style.dashScale
+                });
+            } else {
+                // Match twin when not dashed
+                setSingleEdgeStyle(twin.mesh, twin.clusterIndex, twin.edgeIndex, {
+                    color: style.color.clone(),
+                    width: style.width,
+                    dashed: false,
+                    dashScale: style.dashScale
+                });
+            }
 
             const twinCluster = twin.mesh.userData.cluster;
             const twinClusterStyle = edgeStyles.get(twin.mesh).get(twin.clusterIndex);
@@ -704,29 +721,46 @@ function applyUIEdgeStyleToSingleEdge() {
         const twinMesh = twin.mesh;
         const twinClusterIndex = twin.clusterIndex;
         const twinEdgeIndex = twin.edgeIndex;
-        
-        if (twin.mesh === mesh && twin.clusterIndex === clusterIndex && twin.edgeIndex === edgeIndex) {
+
+        const isSelected =
+            twinMesh === mesh &&
+            twinClusterIndex === clusterIndex &&
+            twinEdgeIndex === edgeIndex;
+
+        if (isSelected) {
+            // Selected edge always gets the full style
+            setSingleEdgeStyle(mesh, clusterIndex, edgeIndex, style);
             continue;
         }
 
-        // setSingleEdgeStyle(twinMesh, twinClusterIndex, twinEdgeIndex, style);
-        setSingleEdgeStyle(twin.mesh, twin.clusterIndex, twin.edgeIndex, {
-            color: style.color.clone(),
-            width: 0,            // HIDE the twin
-            dashed: false,
-            dashScale: style.dashScale,
-        });
+        if (style.dashed) {
+            // --- CASE 1: Selected edge is dashed → hide twin ---
+            setSingleEdgeStyle(twinMesh, twinClusterIndex, twinEdgeIndex, {
+                color: style.color.clone(),
+                width: 0,
+                dashed: false,
+                dashScale: style.dashScale
+            });
+        } else {
+            // --- CASE 2: Selected edge is NOT dashed → twins match ---
+            setSingleEdgeStyle(twinMesh, twinClusterIndex, twinEdgeIndex, {
+                color: style.color.clone(),
+                width: style.width,
+                dashed: false,
+                dashScale: style.dashScale
+            });
+        }
 
-        setSingleEdgeStyle(mesh, clusterIndex, edgeIndex, style);
-
-        const clusterStyle = edgeStyles.get(mesh).get(clusterIndex);
-        updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle);
-
+        // Rebuild twin cluster lines
         const twinClusterStyle = edgeStyles.get(twinMesh).get(twinClusterIndex);
         const twinCluster = twinMesh.userData.cluster;
 
         updatePersistentEdgeLinesForCluster(twinMesh, twinCluster, twinClusterStyle);
     }
+
+    // Rebuild selected cluster lines
+    const clusterStyle = edgeStyles.get(mesh).get(clusterIndex);
+    updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle);
 
     // Re-highlight the originally selected edge
     highlightSingleEdge(mesh, cluster, edgeIndex);
@@ -1630,12 +1664,16 @@ function exportSVG() {
     const height = renderer.domElement.height;
 
     const svgPaths = [];
-    const meshes = [];
-    currentModel.traverse(o => { if (o.isMesh) meshes.push(o); });
+
+    // Instead of mesh.userData.surfaceClusters → use parentToClusters
+    const clusterMeshes = [];
+    currentModel.traverse(o => {
+        if (o.isMesh && o.userData.cluster && o.userData.clusterIndex != null) {
+            clusterMeshes.push(o);
+        }
+    });
 
     const emittedClusterSignatures = new Set();
-
-    // --- Helpers -------------------------------------------------------------
 
     function signedArea2D(pts) {
         let a = 0;
@@ -1667,162 +1705,226 @@ function exportSVG() {
         return inside;
     }
 
-    // --- Main ---------------------------------------------------------------
+    for (const mesh of clusterMeshes) {
 
-    for (const mesh of meshes) {
-        const clusters = mesh.userData.surfaceClusters;
-        if (!clusters) continue;
+        const cluster = mesh.userData.cluster;
+        const clusterIndex = mesh.userData.clusterIndex;
+        if (!cluster || cluster.length === 0) continue;
 
         const geo    = mesh.geometry;
         const index  = geo.index;
         const colors = geo.attributes.color;
 
-        clusters.forEach((cluster, clusterIndex) => {
-            if (!cluster || cluster.length === 0) return;
+        // --- Face fill color ---
+        const f0 = cluster[0];
+        const i0 = index.getX(f0 * 3 + 0);
 
-            // --- 1. Face color ------------------------------------------------
-            const f0 = cluster[0];
-            const i0 = index.getX(f0 * 3 + 0);
+        const lr = colors.getX(i0);
+        const lg = colors.getY(i0);
+        const lb = colors.getZ(i0);
+        const a  = colors.getW(i0);
 
-            const lr = colors.getX(i0);
-            const lg = colors.getY(i0);
-            const lb = colors.getZ(i0);
-            const a  = colors.getW(i0);
+        const srgb = new THREE.Color(lr, lg, lb).convertLinearToSRGB();
+        const fillColor   = `rgb(${Math.round(srgb.r * 255)},${Math.round(srgb.g * 255)},${Math.round(srgb.b * 255)})`;
+        const fillOpacity = a;
 
-            const srgb = new THREE.Color(lr, lg, lb).convertLinearToSRGB();
-            const fillColor   = `rgb(${Math.round(srgb.r * 255)},${Math.round(srgb.g * 255)},${Math.round(srgb.b * 255)})`;
-            const fillOpacity = a;
+        // --- Edge style ---
+        const style = edgeStyles.get(mesh)?.get(clusterIndex);
+        if (!style) continue;
 
-            // --- 2. Stroke style ---------------------------------------------
-            const style = edgeStyles.get(mesh)?.get(clusterIndex);
-            if (!style) return;
+        // const strokeColor = style.color.clone().convertLinearToSRGB().getStyle();
+        const strokeColor = style.color.clone().getStyle();
 
-            const strokeColor = style.color.clone().convertLinearToSRGB().getStyle();
+        // --- Boundary edges ---
+        const edgeAttr = getBoundaryEdges(geo, cluster);
+        if (!edgeAttr || edgeAttr.count === 0) continue;
 
-            // --- 3. Boundary edges -------------------------------------------
-            const edgeAttr = getBoundaryEdges(geo, cluster);
-            if (!edgeAttr || edgeAttr.count === 0) return;
+        const segments = [];
+        for (let i = 0; i < edgeAttr.count; i += 2) {
+            const v1 = new THREE.Vector3(
+                edgeAttr.array[i*3+0],
+                edgeAttr.array[i*3+1],
+                edgeAttr.array[i*3+2]
+            ).applyMatrix4(mesh.matrixWorld);
 
-            const segments = [];
-            for (let i = 0; i < edgeAttr.count; i += 2) {
-                const v1 = new THREE.Vector3(
-                    edgeAttr.array[i*3+0],
-                    edgeAttr.array[i*3+1],
-                    edgeAttr.array[i*3+2]
-                ).applyMatrix4(mesh.matrixWorld);
+            const v2 = new THREE.Vector3(
+                edgeAttr.array[(i+1)*3+0],
+                edgeAttr.array[(i+1)*3+1],
+                edgeAttr.array[(i+1)*3+2]
+            ).applyMatrix4(mesh.matrixWorld);
 
-                const v2 = new THREE.Vector3(
-                    edgeAttr.array[(i+1)*3+0],
-                    edgeAttr.array[(i+1)*3+1],
-                    edgeAttr.array[(i+1)*3+2]
-                ).applyMatrix4(mesh.matrixWorld);
+            segments.push([v1, v2]);
+        }
 
-                segments.push([v1, v2]);
+        // --- Build loops ---
+        let loops = buildOrderedLoops(segments);
+        if (!loops || loops.length === 0) continue;
+
+        // Deduplicate loops
+        const seenLoopSigs = new Set();
+        const uniqueLoops  = [];
+
+        for (const loop of loops) {
+            const sig = loopSignature(loop);
+            if (!seenLoopSigs.has(sig)) {
+                seenLoopSigs.add(sig);
+                uniqueLoops.push(loop);
             }
+        }
+        loops = uniqueLoops;
+        if (loops.length === 0) continue;
 
-            // --- 4. Build ordered loops --------------------------------------
-            let loops = buildOrderedLoops(segments);
-            if (!loops || loops.length === 0) return;
+        // --- Project loops ---
+        const loopInfos = [];
+        const clusterGeomSigParts = [];
 
-            // --- 5. Deduplicate loops ----------------------------------------
-            const seenLoopSigs = new Set();
-            const uniqueLoops  = [];
+        for (const loop of loops) {
+            const projected = loop.map(v => {
+                const p = v.clone().project(activeCamera);
+                return [
+                    (p.x * 0.5 + 0.5) * width,
+                    (1 - (p.y * 0.5 + 0.5)) * height
+                ];
+            });
 
-            for (const loop of loops) {
-                const sig = loopSignature(loop);
-                if (!seenLoopSigs.has(sig)) {
-                    seenLoopSigs.add(sig);
-                    uniqueLoops.push(loop);
+            const area = signedArea2D(projected);
+
+            clusterGeomSigParts.push(
+                projected
+                    .map(p => `${p[0].toFixed(2)},${p[1].toFixed(2)}`)
+                    .sort()
+                    .join("|")
+            );
+
+            loopInfos.push({ projected, area });
+        }
+
+        // --- Classify holes ---
+        for (const li of loopInfos) {
+            const c = centroid(li.projected);
+            li.isHole = false;
+
+            for (const other of loopInfos) {
+                if (other === li) continue;
+                if (Math.abs(other.area) < Math.abs(li.area)) continue;
+                if (pointInPolygon(c, other.projected)) {
+                    li.isHole = true;
+                    break;
                 }
             }
-            loops = uniqueLoops;
-            if (loops.length === 0) return;
+        }
 
-            // --- 6. Project + classify loops ---------------------------------
-            const loopInfos = [];
-            const clusterGeomSigParts = [];
+        // --- Build SVG path ---
+        let d = "";
 
-            for (const loop of loops) {
-                const projected = loop.map(v => {
-                    const p = v.clone().project(activeCamera);
-                    return [
-                        (p.x * 0.5 + 0.5) * width,
-                        (1 - (p.y * 0.5 + 0.5)) * height
-                    ];
-                });
+        for (const li of loopInfos) {
+            let pts = li.projected;
 
-                const area = signedArea2D(projected);
-
-                clusterGeomSigParts.push(
-                    projected
-                        .map(p => `${p[0].toFixed(2)},${p[1].toFixed(2)}`)
-                        .sort()
-                        .join("|")
-                );
-
-                loopInfos.push({ projected, area });
+            if (!li.isHole) {
+                if (li.area < 0) pts = pts.slice().reverse();
+            } else {
+                if (li.area > 0) pts = pts.slice().reverse();
             }
 
-            // Determine which loops are holes
-            for (const li of loopInfos) {
-                const c = centroid(li.projected);
-                li.isHole = false;
+            d += pts.map((p, i) => {
+                const cmd = (i === 0) ? "M" : "L";
+                return `${cmd} ${p[0]},${p[1]}`;
+            }).join(" ") + " Z ";
+        }
 
-                for (const other of loopInfos) {
-                    if (other === li) continue;
-                    if (Math.abs(other.area) < Math.abs(li.area)) continue;
-                    if (pointInPolygon(c, other.projected)) {
-                        li.isHole = true;
-                        break;
-                    }
-                }
-            }
+        let fillPath = `
+            <path d="${d}"
+                fill="${fillColor}"
+                fill-opacity="${fillOpacity}"
+                stroke="none"
+                fill-rule="nonzero"
+            />
+        `;
 
-            // --- 7. Build final path with enforced winding --------------------
-            let d = "";
+        // --- PER-EDGE STROKES (GROUPED PER CLUSTER) ---
+        let edgeGroup = `<g id="cluster-${clusterIndex}-group">`;
 
-            for (const li of loopInfos) {
-                let pts = li.projected;
+        edgeGroup += fillPath;   // <-- ADD FILL SHAPE FIRST
 
-                if (!li.isHole) {
-                    // Outer → CCW
-                    if (li.area < 0) pts = pts.slice().reverse();
-                } else {
-                    // Hole → CW
-                    if (li.area > 0) pts = pts.slice().reverse();
-                }
+        const meshOverrides = edgeOverrides.get(mesh);
+        const clusterOverrides = meshOverrides ? meshOverrides.get(clusterIndex) : null;
 
-                d += pts.map((p, i) => {
-                    const cmd = (i === 0) ? "M" : "L";
-                    return `${cmd} ${p[0]},${p[1]}`;
-                }).join(" ") + " Z ";
-            }
+        for (let i = 0; i < edgeAttr.count; i += 2) {
+            const edgeIndex = i / 2;
 
-            // --- 8. Cluster-level dedupe -------------------------------------
-            const clusterSig = [
-                fillColor,
-                fillOpacity.toFixed(3),
-                strokeColor,
-                style.width.toFixed(3),
-                style.dashed ? style.dashScale.toFixed(3) : "solid",
-                clusterGeomSigParts.sort().join("||")
-            ].join("::");
+            const v1 = new THREE.Vector3(
+                edgeAttr.array[i*3+0],
+                edgeAttr.array[i*3+1],
+                edgeAttr.array[i*3+2]
+            ).applyMatrix4(mesh.matrixWorld);
 
-            if (emittedClusterSignatures.has(clusterSig)) return;
-            emittedClusterSignatures.add(clusterSig);
+            const v2 = new THREE.Vector3(
+                edgeAttr.array[(i+1)*3+0],
+                edgeAttr.array[(i+1)*3+1],
+                edgeAttr.array[(i+1)*3+2]
+            ).applyMatrix4(mesh.matrixWorld);
 
-            // --- 9. Emit path -------------------------------------------------
-            svgPaths.push(`
-                <path d="${d}"
-                      fill="${fillColor}"
-                      fill-opacity="${fillOpacity}"
-                      stroke="${strokeColor}"
-                      stroke-width="${style.width}"
-                      ${style.dashed ? `stroke-dasharray="${style.dashScale * 70}"` : ""}
-                      fill-rule="nonzero"
+            const p1 = v1.clone().project(activeCamera);
+            const p2 = v2.clone().project(activeCamera);
+
+            const x1 = (p1.x * 0.5 + 0.5) * width;
+            const y1 = (1 - (p1.y * 0.5 + 0.5)) * height;
+
+            const x2 = (p2.x * 0.5 + 0.5) * width;
+            const y2 = (1 - (p2.y * 0.5 + 0.5)) * height;
+
+            const s = clusterOverrides && clusterOverrides.get(edgeIndex)
+                ? clusterOverrides.get(edgeIndex)
+                : style;
+
+            if (s.width <= 0) continue;
+
+            // const strokeColor = s.color.clone().convertLinearToSRGB().getStyle();
+            const strokeColor = s.color.clone().getStyle();
+            const dash = s.dashed ? `stroke-dasharray="${s.dashScale * 70}"` : "";
+
+            edgeGroup += `
+                <path d="M ${x1},${y1} L ${x2},${y2}"
+                    fill="none"
+                    stroke="${strokeColor}"
+                    stroke-width="${s.width}"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    ${dash}
                 />
-            `);
-        });
+            `;
+        }
+
+        edgeGroup += `</g>`;
+        svgPaths.push(edgeGroup);
+
+
+        // --- Cluster-level dedupe ---
+        const clusterSig = [
+            fillColor,
+            fillOpacity.toFixed(3),
+            strokeColor,
+            style.width.toFixed(3),
+            style.dashed ? style.dashScale.toFixed(3) : "solid",
+            clusterGeomSigParts.sort().join("||")
+        ].join("::");
+
+        if (emittedClusterSignatures.has(clusterSig)) continue;
+        emittedClusterSignatures.add(clusterSig);
+
+        // // --- Emit path ---
+        // svgPaths.push(`
+        //     <path d="${d}"
+        //         fill="${fillColor}"
+        //         fill-opacity="${fillOpacity}"
+        //         stroke="${strokeColor}"
+        //         stroke-width="${style.width}"
+        //         stroke-linecap="round"
+        //         stroke-linejoin="round"
+        //         ${style.dashed ? `stroke-dasharray="${style.dashScale * 70}"` : ""}
+        //         fill-rule="nonzero"
+        //     />
+        // `);
     }
 
     return `
@@ -1833,6 +1935,7 @@ function exportSVG() {
         </svg>
     `;
 }
+
 
 function loopSignature(loop) {
     const pts = loop.map(v => `${v.x.toFixed(5)},${v.y.toFixed(5)},${v.z.toFixed(5)}`);

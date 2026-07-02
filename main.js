@@ -766,6 +766,80 @@ function applyUIEdgeStyleToSingleEdge() {
     highlightSingleEdge(mesh, cluster, edgeIndex);
 }
 
+function applyUIEdgeStyleToMultipleEdges() {
+    if (!currentSelectedEdge) return;
+
+    const { mesh, cluster, edgeIndices } = currentSelectedEdge;
+    const clusterIndex = mesh.userData.clusterIndex;
+
+    const style = {
+        color: new THREE.Color(edgeColorInput.value),
+        width: parseFloat(edgeWidthInput.value),
+        dashed: edgeDashedInput.checked,
+        dashScale: parseFloat(edgeDashScaleInput.value)
+    };
+
+    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+    const arr = edgeAttr.array;
+
+    for (const edgeIndex of edgeIndices) {
+        const i = edgeIndex * 6;
+
+        const p1World = new THREE.Vector3(arr[i], arr[i+1], arr[i+2]).applyMatrix4(mesh.matrixWorld);
+        const p2World = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]).applyMatrix4(mesh.matrixWorld);
+
+        const key = canonicalEdgeKey(p1World, p2World);
+        const twins = globalEdgeMap.get(key) || [];
+
+        for (const twin of twins) {
+            const twinMesh = twin.mesh;
+            const twinClusterIndex = twin.clusterIndex;
+            const twinEdgeIndex = twin.edgeIndex;
+
+            const isSelected =
+                twinMesh === mesh &&
+                twinClusterIndex === clusterIndex &&
+                twinEdgeIndex === edgeIndex;
+
+            if (isSelected) {
+                // Selected edges get full style
+                setSingleEdgeStyle(mesh, clusterIndex, edgeIndex, style);
+            } else {
+                // Twins follow dashed/hide rule
+                if (style.dashed) {
+                    setSingleEdgeStyle(twinMesh, twinClusterIndex, twinEdgeIndex, {
+                        color: style.color.clone(),
+                        width: 0,
+                        dashed: false,
+                        dashScale: style.dashScale
+                    });
+                } else {
+                    setSingleEdgeStyle(twinMesh, twinClusterIndex, twinEdgeIndex, {
+                        color: style.color.clone(),
+                        width: style.width,
+                        dashed: false,
+                        dashScale: style.dashScale
+                    });
+                }
+            }
+
+            // Rebuild twin cluster lines
+            const twinClusterStyle = edgeStyles.get(twinMesh).get(twinClusterIndex);
+            const twinCluster = twinMesh.userData.cluster;
+
+            updatePersistentEdgeLinesForCluster(twinMesh, twinCluster, twinClusterStyle);
+        }
+    }
+
+    // Rebuild selected cluster lines
+    const clusterStyle = edgeStyles.get(mesh).get(clusterIndex);
+    updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle);
+
+    // Re-highlight all edges
+    highlightMultipleEdges(mesh, cluster, edgeIndices);
+}
+
+
 // ------------------------------------------------------------
 // Geometry helpers
 // ------------------------------------------------------------
@@ -883,9 +957,12 @@ function highlightFace(hit) {
                     }
                 }
             }
-            highlightSingleEdge(mesh, cluster, bestIndex);
+            // highlightSingleEdge(mesh, cluster, bestIndex);
+            const related = collectRelatedEdges(mesh, cluster, bestIndex);
+            highlightMultipleEdges(mesh, cluster, related);
 
-            if (editEdges) applyUIEdgeStyleToSingleEdge();
+            // if (editEdges) applyUIEdgeStyleToSingleEdge();
+            if (editEdges) applyUIEdgeStyleToMultipleEdges();
             else loadEdgeStyleIntoUI(mesh, cluster, bestIndex); 
         }
         return;
@@ -997,6 +1074,51 @@ function highlightEdges(clusterMesh, edgeAttr){
     scene.add(boundaryEdges);
     boundaryEdges.raycast = () => {};
 }
+function highlightMultipleEdges(mesh, cluster, edgeIndices) {
+    // Clear previous highlight
+    if (singleEdgeHighlight) {
+        scene.remove(singleEdgeHighlight);
+        singleEdgeHighlight.geometry.dispose();
+        singleEdgeHighlight.material.dispose();
+        singleEdgeHighlight = null;
+    }
+
+    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+    const arr = edgeAttr.array;
+
+    const positions = [];
+
+    for (const ei of edgeIndices) {
+        const i = ei * 6;
+
+        const p1 = new THREE.Vector3(arr[i], arr[i+1], arr[i+2]).applyMatrix4(mesh.matrixWorld);
+        const p2 = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]).applyMatrix4(mesh.matrixWorld);
+
+        positions.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+
+    const mat = new THREE.LineBasicMaterial({
+        color: 0xff0000,
+        linewidth: 5,
+        depthTest: false,
+        depthWrite: false
+    });
+
+    singleEdgeHighlight = new THREE.LineSegments(geo, mat);
+    singleEdgeHighlight.renderOrder = 999;
+
+    scene.add(singleEdgeHighlight);
+
+    currentSelectedEdge = {
+        mesh,
+        cluster,
+        edgeIndices
+    };
+}
+
 
 // ------------------------------------------------------------
 // Deselection
@@ -1188,7 +1310,8 @@ function applyUIEdgeStyle() {
     else {
         // If a single edge is selected → only update that edge
         if (currentSelectedEdge) {
-            applyUIEdgeStyleToSingleEdge();
+            // applyUIEdgeStyleToSingleEdge();
+            if (editEdges) applyUIEdgeStyleToMultipleEdges();
             return;
         }
 
@@ -1403,6 +1526,98 @@ function buildSurfaceClusters(geometry, angleThresholdDeg = 10) {
 
     return clusters;
 }
+
+// EDGES
+function buildBoundaryEdgeGraph(mesh, cluster) {
+    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+    const arr = edgeAttr.array;
+
+    const edges = [];
+    const vertToEdges = new Map();
+
+    function vKey(p) {
+        return `${p.x.toFixed(6)},${p.y.toFixed(6)},${p.z.toFixed(6)}`;
+    }
+
+    for (let i = 0; i < arr.length; i += 6) {
+        const edgeIndex = i / 6;
+
+        const p1 = new THREE.Vector3(arr[i], arr[i+1], arr[i+2]).applyMatrix4(mesh.matrixWorld);
+        const p2 = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]).applyMatrix4(mesh.matrixWorld);
+
+        const dir = new THREE.Vector3().subVectors(p2, p1).normalize();
+
+        const length = p1.distanceTo(p2);
+
+        const e = {
+            index: edgeIndex,
+            p1, p2,
+            dir,
+            verts: [vKey(p1), vKey(p2)],
+            length
+        };
+
+        edges.push(e);
+
+        for (const vk of e.verts) {
+            if (!vertToEdges.has(vk)) vertToEdges.set(vk, []);
+            vertToEdges.get(vk).push(e);
+        }
+    }
+
+    return { edges, vertToEdges };
+}
+function collectRelatedEdges(mesh, cluster, startEdgeIndex, maxAngleDeg = 20) {
+    const { edges, vertToEdges } = buildBoundaryEdgeGraph(mesh, cluster);
+
+    const startEdge = edges.find(e => e.index === startEdgeIndex);
+    if (!startEdge) return [startEdgeIndex];
+
+    const maxAngle = THREE.MathUtils.degToRad(maxAngleDeg);
+
+    const visited = new Set();
+    const queue = [startEdge];
+
+    visited.add(startEdge.index);
+
+    const maxPct = 0.25; // 25% length tolerance (tunable)
+    // const maxCurvature = 10; // tunable curvature threshold
+
+    while (queue.length > 0) {
+        const cur = queue.shift();
+
+        for (const vk of cur.verts) {
+            const neighbors = vertToEdges.get(vk) || [];
+
+            for (const nb of neighbors) {
+                if (visited.has(nb.index)) continue;
+
+                // --- ANGLE RULE ---
+                const angle1 = cur.dir.angleTo(nb.dir);
+                const angle2 = cur.dir.angleTo(nb.dir.clone().multiplyScalar(-1));
+                const angle = Math.min(angle1, angle2);
+                if (angle > maxAngle) continue;
+
+                // --- LENGTH RULE ---
+                const Lprev = cur.length;
+                const Lnext = nb.length;
+                const pctDiff = Math.abs(Lnext - Lprev) / Lprev;
+
+                if (pctDiff > maxPct) continue;
+
+                // const curvature = angle / cur.length;
+                // if (curvature > maxCurvature) continue;
+
+                // Passed all rules → include
+                visited.add(nb.index);
+                queue.push(nb);
+            }
+        }
+    }
+
+    return Array.from(visited);
+}
+
 
 // ------------------------------------------------------------
 // Camera toggle (optional UI hook)
@@ -1656,7 +1871,477 @@ edgeModeCB.addEventListener("change", () => {
     }
 });
 
-//
+// SILHOUETTE DETECTION
+let lastSilhouettes = [];
+
+
+const clusterMeshes = [];
+const clusterIdColor = new Map(); // mesh → THREE.Color
+
+function getClusterMeshes() {
+    clusterMeshes.length = 0;
+    if (!currentModel) return clusterMeshes;
+
+    let nextId = 1;
+
+    currentModel.traverse(o => {
+        if (o.isMesh && o.userData.cluster && o.userData.clusterIndex != null) {
+            clusterMeshes.push(o);
+
+            const id = nextId++;
+            const r = (id & 0xFF) / 255;
+            const g = ((id >> 8) & 0xFF) / 255;
+            const b = ((id >> 16) & 0xFF) / 255;
+
+            clusterIdColor.set(o, new THREE.Color(r, g, b));
+        }
+    });
+
+    return clusterMeshes;
+}
+const rtWidth  = window.innerWidth;
+const rtHeight = window.innerHeight;
+
+const frontRT = new THREE.WebGLRenderTarget(rtWidth, rtHeight);
+const backRT  = new THREE.WebGLRenderTarget(rtWidth, rtHeight);
+
+function renderClustersToRT(target, side) {
+    const originalMaterials = new Map();
+
+    clusterMeshes.forEach(mesh => {
+        originalMaterials.set(mesh, mesh.material);
+
+        const idColor = clusterIdColor.get(mesh);
+        mesh.material = new THREE.MeshBasicMaterial({
+            color: idColor,
+            side: side
+        });
+    });
+
+    renderer.setRenderTarget(target);
+    renderer.clear();
+    renderer.render(scene, activeCamera);
+    renderer.setRenderTarget(null);
+
+    // restore materials
+    clusterMeshes.forEach(mesh => {
+        mesh.material = originalMaterials.get(mesh);
+    });
+}
+function collectVisibleColors(target) {
+    const pixels = new Uint8Array(rtWidth * rtHeight * 4);
+    renderer.readRenderTargetPixels(target, 0, 0, rtWidth, rtHeight, pixels);
+
+    const seen = new Set();
+
+    for (let i = 0; i < pixels.length; i += 4) {
+        const r = pixels[i];
+        const g = pixels[i + 1];
+        const b = pixels[i + 2];
+
+        if (r === 0 && g === 0 && b === 0) continue; // background
+
+        const key = (r) | (g << 8) | (b << 16);
+        seen.add(key);
+    }
+
+    return seen;
+}
+function detectSilhouettedClusters() {
+    getClusterMeshes();
+
+    // render front and back
+    renderClustersToRT(frontRT, THREE.FrontSide);
+    renderClustersToRT(backRT,  THREE.BackSide);
+
+    const frontSeen = collectVisibleColors(frontRT);
+    const backSeen  = collectVisibleColors(backRT);
+
+    const silhouetted = [];
+
+    clusterMeshes.forEach(mesh => {
+        const c = clusterIdColor.get(mesh);
+        const r = Math.round(c.r * 255);
+        const g = Math.round(c.g * 255);
+        const b = Math.round(c.b * 255);
+        const key = (r) | (g << 8) | (b << 16);
+
+        if (frontSeen.has(key) && backSeen.has(key)) {
+            silhouetted.push(mesh);
+        }
+    });
+
+    return silhouetted;
+}
+const silhouetteButton = document.getElementById("silhouetteButton");
+
+// if (silhouetteButton) {
+//     silhouetteButton.addEventListener("click", () => {
+//         if (!currentModel) return;
+
+//         const silhouettes = detectSilhouettedClusters();
+//         const color = new THREE.Color("#ff00ff");
+//         const opacity = 0.6;
+
+//         silhouettes.forEach(mesh => {
+//             paintCluster(mesh, mesh.userData.cluster, color, opacity, false);
+//         });
+//     });
+// }
+silhouetteButton.addEventListener("click", () => {
+    if (!currentModel) return;
+
+    const silhouettes = detectSilhouettedClusters();
+    lastSilhouettes = silhouettes;   // <-- store for Phase 2
+
+    const color = new THREE.Color("#ff00ff");
+    const opacity = 0.6;
+
+    silhouettes.forEach(mesh => {
+        paintCluster(mesh, mesh.userData.cluster, color, opacity, false);
+    });
+});
+
+function computeFrontBackFaces(mesh) {
+    const cluster = mesh.userData.cluster;
+    const geo = mesh.geometry;
+    const index = geo.index;
+    const pos = geo.attributes.position;
+
+    const normalMatrix = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
+
+    const frontFaces = [];
+    const backFaces  = [];
+
+    for (const f of cluster) {
+        const i0 = index.getX(f * 3 + 0);
+        const i1 = index.getX(f * 3 + 1);
+        const i2 = index.getX(f * 3 + 2);
+
+        const v0 = new THREE.Vector3().fromBufferAttribute(pos, i0);
+        const v1 = new THREE.Vector3().fromBufferAttribute(pos, i1);
+        const v2 = new THREE.Vector3().fromBufferAttribute(pos, i2);
+
+        const centroid = v0.clone().add(v1).add(v2).multiplyScalar(1/3)
+            .applyMatrix4(mesh.matrixWorld);
+
+        const n = new THREE.Vector3()
+            .subVectors(v1, v0)
+            .cross(v2.clone().sub(v0))
+            .applyMatrix3(normalMatrix)
+            .normalize();
+
+        const viewDir = centroid.clone().sub(activeCamera.position).normalize();
+        const dot = n.dot(viewDir);
+
+        if (dot < 0) frontFaces.push(f);
+        else        backFaces.push(f);
+    }
+
+    return { frontFaces, backFaces };
+}
+function splitSilhouetteCluster(mesh) {
+    const { frontFaces, backFaces } = computeFrontBackFaces(mesh);
+
+    if (!frontFaces.length || !backFaces.length) return null;
+
+    // IMPORTANT: use the cluster mesh itself as the source
+    const sourceMesh = mesh; // not mesh.userData.parentMesh
+
+    const frontGeo = buildClusterMesh(sourceMesh, frontFaces);
+    const backGeo  = buildClusterMesh(sourceMesh, backFaces);
+
+    const frontMat = mesh.material.clone();
+    const backMat  = mesh.material.clone();
+
+    const frontMesh = new THREE.Mesh(frontGeo, frontMat);
+    const backMesh  = new THREE.Mesh(backGeo,  backMat);
+
+    // Parent for mapping is still the original parent mesh
+    const parent = mesh.userData.parentMesh;
+    frontMesh.userData.parentMesh = parent;
+    backMesh.userData.parentMesh  = parent;
+
+    // Local clusters in the new geometries: 0..N-1
+    frontMesh.userData.cluster = Array.from({ length: frontFaces.length }, (_, i) => i);
+    backMesh.userData.cluster  = Array.from({ length: backFaces.length },  (_, i) => i);
+
+    frontMesh.userData.clusterIndex = mesh.userData.clusterIndex + "_front";
+    backMesh.userData.clusterIndex  = mesh.userData.clusterIndex + "_back";
+
+    edgeStyles.set(frontMesh, new Map());
+    edgeStyles.set(backMesh,  new Map());
+
+    persistentEdgeLines.set(frontMesh, new Map());
+    persistentEdgeLines.set(backMesh,  new Map());
+
+    edgeOverrides.set(frontMesh, new Map());
+    edgeOverrides.set(backMesh,  new Map());
+
+    return { frontMesh, backMesh };
+}
+
+function copyFaceColors(srcMesh, dstMesh, faceList) {
+    const srcGeo = srcMesh.geometry;
+    const dstGeo = dstMesh.geometry;
+
+    const srcIndex = srcGeo.index;
+    const srcColors = srcGeo.attributes.color;
+
+    const dstIndex = dstGeo.index;
+    const dstColors = dstGeo.attributes.color;
+
+    for (let f = 0; f < faceList.length; f++) {
+        const oldFace = faceList[f];
+
+        const a = srcIndex.getX(oldFace * 3 + 0);
+        const b = srcIndex.getX(oldFace * 3 + 1);
+        const c = srcIndex.getX(oldFace * 3 + 2);
+
+        const na = dstIndex.getX(f * 3 + 0);
+        const nb = dstIndex.getX(f * 3 + 1);
+        const nc = dstIndex.getX(f * 3 + 2);
+
+        [ [a,na], [b,nb], [c,nc] ].forEach(([oldI,newI]) => {
+            dstColors.setX(newI, srcColors.getX(oldI));
+            dstColors.setY(newI, srcColors.getY(oldI));
+            dstColors.setZ(newI, srcColors.getZ(oldI));
+            dstColors.setW(newI, srcColors.getW(oldI));
+        });
+    }
+
+    dstColors.needsUpdate = true;
+}
+function cloneEdgeStyles(srcMesh, dstMesh) {
+    const srcIndex = srcMesh.userData.clusterIndex;
+    const dstIndex = dstMesh.userData.clusterIndex;
+
+    const srcMap = edgeStyles.get(srcMesh);
+    const dstMap = edgeStyles.get(dstMesh);
+
+    const srcStyle = srcMap.get(srcIndex);
+    if (srcStyle) {
+        dstMap.set(dstIndex, {
+            color: srcStyle.color.clone(),
+            width: srcStyle.width,
+            dashed: srcStyle.dashed,
+            dashScale: srcStyle.dashScale
+        });
+    }
+
+    const srcOverridesMesh = edgeOverrides.get(srcMesh);
+    const dstOverridesMesh = edgeOverrides.get(dstMesh);
+
+    const srcOverrides = srcOverridesMesh && srcOverridesMesh.get(srcIndex);
+    if (srcOverrides) {
+        const dstOverrides = new Map();
+        srcOverrides.forEach((style, edgeIndex) => {
+            dstOverrides.set(edgeIndex, {
+                color: style.color.clone(),
+                width: style.width,
+                dashed: style.dashed,
+                dashScale: style.dashScale
+            });
+        });
+        dstOverridesMesh.set(dstIndex, dstOverrides);
+    }
+
+    updatePersistentEdgeLinesForCluster(
+        dstMesh,
+        dstMesh.userData.cluster,
+        edgeStyles.get(dstMesh).get(dstIndex)
+    );
+}
+function replaceClusterMesh(mesh, frontMesh, backMesh) {
+    currentModel.remove(mesh);
+    currentModel.add(frontMesh);
+    currentModel.add(backMesh);
+
+    const parent = mesh.userData.parentMesh;
+    const list = parentToClusters.get(parent);
+
+    const idx = list.indexOf(mesh);
+    if (idx !== -1) {
+        list.splice(idx, 1, frontMesh, backMesh);
+    }
+}
+const splitButton = document.getElementById("splitSilhouetteButton");
+
+splitButton.addEventListener("click", () => {
+    lastSilhouettes.forEach(mesh => {
+        const result = splitSilhouetteCluster(mesh);
+        if (!result) return;
+
+        const { frontMesh, backMesh } = result;
+
+        const { frontFaces, backFaces } = computeFrontBackFaces(mesh);
+
+        copyFaceColors(mesh, frontMesh, frontFaces);
+        copyFaceColors(mesh, backMesh,  backFaces);
+
+        cloneEdgeStyles(mesh, frontMesh);
+        cloneEdgeStyles(mesh, backMesh);
+
+        replaceClusterMesh(mesh, frontMesh, backMesh);
+    });
+});
+
+function collectAllEdgeChains(mesh, cluster, maxAngleDeg = 25, maxPct = 0.25) {
+    const { edges, vertToEdges } = buildBoundaryEdgeGraph(mesh, cluster);
+    const maxAngle = THREE.MathUtils.degToRad(maxAngleDeg);
+
+    const visited = new Set();
+    const chains = [];
+
+    for (const start of edges) {
+        if (visited.has(start.index)) continue;
+
+        // BFS expansion using your existing rules
+        const chain = [];
+        const queue = [start];
+        visited.add(start.index);
+
+        while (queue.length > 0) {
+            const cur = queue.shift();
+            chain.push(cur);
+
+            for (const vk of cur.verts) {
+                const neighbors = vertToEdges.get(vk) || [];
+
+                for (const nb of neighbors) {
+                    if (visited.has(nb.index)) continue;
+
+                    // --- ANGLE RULE ---
+                    const angle1 = cur.dir.angleTo(nb.dir);
+                    const angle2 = cur.dir.angleTo(nb.dir.clone().multiplyScalar(-1));
+                    const angle = Math.min(angle1, angle2);
+                    if (angle > maxAngle) continue;
+
+                    // --- LENGTH RULE ---
+                    const pctDiff = Math.abs(nb.length - cur.length) / cur.length;
+                    if (pctDiff > maxPct) continue;
+
+                    visited.add(nb.index);
+                    queue.push(nb);
+                }
+            }
+        }
+
+        chains.push(chain);
+    }
+
+    return chains;
+}
+function orderChainVertices(chain) {
+    // Build adjacency by vertex key
+    const vertMap = new Map();
+
+    function vKey(p) {
+        return `${p.x.toFixed(6)},${p.y.toFixed(6)},${p.z.toFixed(6)}`;
+    }
+
+    for (const e of chain) {
+        for (const vk of e.verts) {
+            if (!vertMap.has(vk)) vertMap.set(vk, []);
+            vertMap.get(vk).push(e);
+        }
+    }
+
+    // Find endpoints (degree 1)
+    const endpoints = [...vertMap.entries()]
+        .filter(([k, list]) => list.length === 1)
+        .map(([k]) => k);
+
+    let startKey;
+
+    if (endpoints.length >= 1) {
+        startKey = endpoints[0]; // open polyline
+    } else {
+        // closed loop → pick any vertex
+        startKey = chain[0].verts[0];
+    }
+
+    const ordered = [];
+    const visitedEdges = new Set();
+    let currentKey = startKey;
+
+    while (true) {
+        const edgesAtKey = vertMap.get(currentKey) || [];
+        const nextEdge = edgesAtKey.find(e => !visitedEdges.has(e.index));
+        if (!nextEdge) break;
+
+        visitedEdges.add(nextEdge.index);
+
+        // Determine direction
+        const [k1, k2] = nextEdge.verts;
+        const p1 = nextEdge.p1;
+        const p2 = nextEdge.p2;
+
+        if (vKey(p1) === currentKey) {
+            ordered.push(p1, p2);
+            currentKey = vKey(p2);
+        } else {
+            ordered.push(p2, p1);
+            currentKey = vKey(p1);
+        }
+    }
+
+    return ordered;
+}
+
+function buildQuadraticBezierPath(verts2D, alpha = 0.25) {
+    if (verts2D.length < 2) return "";
+
+    let d = `M ${verts2D[0][0]},${verts2D[0][1]} `;
+
+    if (verts2D.length === 2) {
+        d += `L ${verts2D[1][0]},${verts2D[1][1]}`;
+        return d;
+    }
+
+    for (let i = 0; i < verts2D.length - 1; i++) {
+        const p0 = verts2D[Math.max(0, i - 1)];
+        const p1 = verts2D[i];
+        const p2 = verts2D[i + 1];
+
+        // Control point halfway between p1 and the midpoint of p0/p2
+        const mx = (p0[0] + p2[0]) * 0.5;
+        const my = (p0[1] + p2[1]) * 0.5;
+
+        const cx = p1[0] + alpha * (mx - p1[0]);
+        const cy = p1[1] + alpha * (my - p1[1]);
+
+        d += `Q ${cx},${cy} ${p2[0]},${p2[1]} `;
+    }
+
+    return d;
+}
+
+function smoothChain3D(verts3D, alpha = 0.25) {
+    if (verts3D.length < 3) return verts3D;
+
+    const smoothed = [verts3D[0]];
+
+    for (let i = 1; i < verts3D.length - 1; i++) {
+        const pPrev = verts3D[i - 1];
+        const p     = verts3D[i];
+        const pNext = verts3D[i + 1];
+
+        const mid = new THREE.Vector3()
+            .addVectors(pPrev, pNext)
+            .multiplyScalar(0.5);
+
+        const c = new THREE.Vector3()
+            .lerpVectors(p, mid, alpha);
+
+        smoothed.push(c);
+    }
+
+    smoothed.push(verts3D[verts3D.length - 1]);
+    return smoothed;
+}
+
+
 function exportSVG() {
     if (!currentModel) return;
 
@@ -1665,7 +2350,6 @@ function exportSVG() {
 
     const svgPaths = [];
 
-    // Instead of mesh.userData.surfaceClusters → use parentToClusters
     const clusterMeshes = [];
     currentModel.traverse(o => {
         if (o.isMesh && o.userData.cluster && o.userData.clusterIndex != null) {
@@ -1732,10 +2416,9 @@ function exportSVG() {
         const style = edgeStyles.get(mesh)?.get(clusterIndex);
         if (!style) continue;
 
-        // const strokeColor = style.color.clone().convertLinearToSRGB().getStyle();
         const strokeColor = style.color.clone().getStyle();
 
-        // --- Boundary edges ---
+        // --- Boundary edges for fill (original behavior) ---
         const edgeAttr = getBoundaryEdges(geo, cluster);
         if (!edgeAttr || edgeAttr.count === 0) continue;
 
@@ -1756,7 +2439,7 @@ function exportSVG() {
             segments.push([v1, v2]);
         }
 
-        // --- Build loops ---
+        // --- Build loops (original) ---
         let loops = buildOrderedLoops(segments);
         if (!loops || loops.length === 0) continue;
 
@@ -1814,7 +2497,7 @@ function exportSVG() {
             }
         }
 
-        // --- Build SVG path ---
+        // --- Build SVG path for fill (unchanged) ---
         let d = "";
 
         for (const li of loopInfos) {
@@ -1841,53 +2524,77 @@ function exportSVG() {
             />
         `;
 
-        // --- PER-EDGE STROKES (GROUPED PER CLUSTER) ---
+        // --- STROKES: use chain grouping, but keep fill intact ---
         let edgeGroup = `<g id="cluster-${clusterIndex}-group">`;
-
-        edgeGroup += fillPath;   // <-- ADD FILL SHAPE FIRST
+        edgeGroup += fillPath;
 
         const meshOverrides = edgeOverrides.get(mesh);
         const clusterOverrides = meshOverrides ? meshOverrides.get(clusterIndex) : null;
 
-        for (let i = 0; i < edgeAttr.count; i += 2) {
-            const edgeIndex = i / 2;
+        // Build chains from boundary edges using your new rules
+        const chains = collectAllEdgeChains(mesh, cluster);
 
-            const v1 = new THREE.Vector3(
-                edgeAttr.array[i*3+0],
-                edgeAttr.array[i*3+1],
-                edgeAttr.array[i*3+2]
-            ).applyMatrix4(mesh.matrixWorld);
+        for (const chain of chains) {
 
-            const v2 = new THREE.Vector3(
-                edgeAttr.array[(i+1)*3+0],
-                edgeAttr.array[(i+1)*3+1],
-                edgeAttr.array[(i+1)*3+2]
-            ).applyMatrix4(mesh.matrixWorld);
+            // Determine effective style for this chain
+            let chainStyle = null;
+            let chainVisible = false;
 
-            const p1 = v1.clone().project(activeCamera);
-            const p2 = v2.clone().project(activeCamera);
+            for (const e of chain) {
+                const edgeIndex = e.index;
 
-            const x1 = (p1.x * 0.5 + 0.5) * width;
-            const y1 = (1 - (p1.y * 0.5 + 0.5)) * height;
+                const s = clusterOverrides && clusterOverrides.get(edgeIndex)
+                    ? clusterOverrides.get(edgeIndex)
+                    : style;
 
-            const x2 = (p2.x * 0.5 + 0.5) * width;
-            const y2 = (1 - (p2.y * 0.5 + 0.5)) * height;
+                if (s.width > 0) {
+                    chainVisible = true;
+                    chainStyle = s;   // last visible style wins
+                }
+            }
 
-            const s = clusterOverrides && clusterOverrides.get(edgeIndex)
-                ? clusterOverrides.get(edgeIndex)
-                : style;
+            if (!chainVisible || !chainStyle) continue;
 
-            if (s.width <= 0) continue;
+            // Order vertices for this chain
+            const verts = orderChainVertices(chain);
 
-            // const strokeColor = s.color.clone().convertLinearToSRGB().getStyle();
-            const strokeColor = s.color.clone().getStyle();
-            const dash = s.dashed ? `stroke-dasharray="${s.dashScale * 70}"` : "";
+            // let dStroke = "";
+            // for (let i = 0; i < verts.length; i++) {
+            //     const pProj = verts[i].clone().project(activeCamera);
+            //     const x = (pProj.x * 0.5 + 0.5) * width;
+            //     const y = (1 - (pProj.y * 0.5 + 0.5)) * height;
+
+            //     dStroke += (i === 0)
+            //         ? `M ${x},${y} `
+            //         : `L ${x},${y} `;
+            // }
+            
+            // Project chain vertices to 2D
+            const verts3D = verts.map(v => v.clone());
+            const smooth3D = smoothChain3D(verts3D, 0.35);
+
+            const verts2D = smooth3D.map(v => {
+                const p = v.clone().project(activeCamera);
+                return [
+                    (p.x * 0.5 + 0.5) * width,
+                    (1 - (p.y * 0.5 + 0.5)) * height
+                ];
+            });
+
+            // Build smoothed quadratic Bézier path
+            const dStroke = buildQuadraticBezierPath(verts2D, 0.5);
+
+
+            const strokeColor = chainStyle.color.clone().getStyle();
+            const dash = chainStyle.dashed
+                ? `stroke-dasharray="${chainStyle.dashScale * 70}"`
+                : "";
 
             edgeGroup += `
-                <path d="M ${x1},${y1} L ${x2},${y2}"
+                <path d="${dStroke}"
                     fill="none"
                     stroke="${strokeColor}"
-                    stroke-width="${s.width}"
+                    stroke-width="${chainStyle.width}"
                     stroke-linecap="round"
                     stroke-linejoin="round"
                     ${dash}
@@ -1895,11 +2602,11 @@ function exportSVG() {
             `;
         }
 
+
         edgeGroup += `</g>`;
         svgPaths.push(edgeGroup);
 
-
-        // --- Cluster-level dedupe ---
+        // --- Cluster-level dedupe (unchanged) ---
         const clusterSig = [
             fillColor,
             fillOpacity.toFixed(3),
@@ -1911,20 +2618,6 @@ function exportSVG() {
 
         if (emittedClusterSignatures.has(clusterSig)) continue;
         emittedClusterSignatures.add(clusterSig);
-
-        // // --- Emit path ---
-        // svgPaths.push(`
-        //     <path d="${d}"
-        //         fill="${fillColor}"
-        //         fill-opacity="${fillOpacity}"
-        //         stroke="${strokeColor}"
-        //         stroke-width="${style.width}"
-        //         stroke-linecap="round"
-        //         stroke-linejoin="round"
-        //         ${style.dashed ? `stroke-dasharray="${style.dashScale * 70}"` : ""}
-        //         fill-rule="nonzero"
-        //     />
-        // `);
     }
 
     return `
@@ -1935,6 +2628,7 @@ function exportSVG() {
         </svg>
     `;
 }
+
 
 
 function loopSignature(loop) {

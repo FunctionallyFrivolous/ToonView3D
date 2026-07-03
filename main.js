@@ -2341,6 +2341,13 @@ function smoothChain3D(verts3D, alpha = 0.25) {
     return smoothed;
 }
 
+function computeCentroid(points) {
+    const c = new THREE.Vector3();
+    for (const p of points) c.add(p);
+    c.divideScalar(points.length);
+    return c;
+}
+
 
 function exportSVG() {
     if (!currentModel) return;
@@ -2348,7 +2355,7 @@ function exportSVG() {
     const width  = renderer.domElement.width;
     const height = renderer.domElement.height;
 
-    const svgPaths = [];
+    const svgItems = [];
 
     const clusterMeshes = [];
     currentModel.traverse(o => {
@@ -2369,7 +2376,7 @@ function exportSVG() {
         return 0.5 * a;
     }
 
-    function centroid(pts) {
+    function centroid2D(pts) {
         let x = 0, y = 0;
         for (const p of pts) { x += p[0]; y += p[1]; }
         return [x / pts.length, y / pts.length];
@@ -2387,6 +2394,13 @@ function exportSVG() {
             if (intersect) inside = !inside;
         }
         return inside;
+    }
+
+    function centroid3D(points) {
+        const c = new THREE.Vector3();
+        for (const p of points) c.add(p);
+        c.divideScalar(points.length);
+        return c;
     }
 
     for (const mesh of clusterMeshes) {
@@ -2418,7 +2432,7 @@ function exportSVG() {
 
         const strokeColor = style.color.clone().getStyle();
 
-        // --- Boundary edges for fill (original behavior) ---
+        // --- Boundary edges for fill ---
         const edgeAttr = getBoundaryEdges(geo, cluster);
         if (!edgeAttr || edgeAttr.count === 0) continue;
 
@@ -2439,7 +2453,7 @@ function exportSVG() {
             segments.push([v1, v2]);
         }
 
-        // --- Build loops (original) ---
+        // --- Build loops ---
         let loops = buildOrderedLoops(segments);
         if (!loops || loops.length === 0) continue;
 
@@ -2484,7 +2498,7 @@ function exportSVG() {
 
         // --- Classify holes ---
         for (const li of loopInfos) {
-            const c = centroid(li.projected);
+            const c = centroid2D(li.projected);
             li.isHole = false;
 
             for (const other of loopInfos) {
@@ -2497,7 +2511,7 @@ function exportSVG() {
             }
         }
 
-        // --- Build SVG path for fill (unchanged) ---
+        // --- Build SVG path for fill ---
         let d = "";
 
         for (const li of loopInfos) {
@@ -2524,19 +2538,17 @@ function exportSVG() {
             />
         `;
 
-        // --- STROKES: use chain grouping, but keep fill intact ---
+        // --- STROKES: chain grouping ---
         let edgeGroup = `<g id="cluster-${clusterIndex}-group">`;
         edgeGroup += fillPath;
 
         const meshOverrides = edgeOverrides.get(mesh);
         const clusterOverrides = meshOverrides ? meshOverrides.get(clusterIndex) : null;
 
-        // Build chains from boundary edges using your new rules
         const chains = collectAllEdgeChains(mesh, cluster);
 
         for (const chain of chains) {
 
-            // Determine effective style for this chain
             let chainStyle = null;
             let chainVisible = false;
 
@@ -2549,27 +2561,14 @@ function exportSVG() {
 
                 if (s.width > 0) {
                     chainVisible = true;
-                    chainStyle = s;   // last visible style wins
+                    chainStyle = s;
                 }
             }
 
             if (!chainVisible || !chainStyle) continue;
 
-            // Order vertices for this chain
             const verts = orderChainVertices(chain);
 
-            // let dStroke = "";
-            // for (let i = 0; i < verts.length; i++) {
-            //     const pProj = verts[i].clone().project(activeCamera);
-            //     const x = (pProj.x * 0.5 + 0.5) * width;
-            //     const y = (1 - (pProj.y * 0.5 + 0.5)) * height;
-
-            //     dStroke += (i === 0)
-            //         ? `M ${x},${y} `
-            //         : `L ${x},${y} `;
-            // }
-            
-            // Project chain vertices to 2D
             const verts3D = verts.map(v => v.clone());
             const smooth3D = smoothChain3D(verts3D, 0.35);
 
@@ -2581,11 +2580,9 @@ function exportSVG() {
                 ];
             });
 
-            // Build smoothed quadratic Bézier path
             const dStroke = buildQuadraticBezierPath(verts2D, 0.5);
 
-
-            const strokeColor = chainStyle.color.clone().getStyle();
+            const strokeColorChain = chainStyle.color.clone().getStyle();
             const dash = chainStyle.dashed
                 ? `stroke-dasharray="${chainStyle.dashScale * 70}"`
                 : "";
@@ -2593,7 +2590,7 @@ function exportSVG() {
             edgeGroup += `
                 <path d="${dStroke}"
                     fill="none"
-                    stroke="${strokeColor}"
+                    stroke="${strokeColorChain}"
                     stroke-width="${chainStyle.width}"
                     stroke-linecap="round"
                     stroke-linejoin="round"
@@ -2602,11 +2599,9 @@ function exportSVG() {
             `;
         }
 
-
         edgeGroup += `</g>`;
-        svgPaths.push(edgeGroup);
 
-        // --- Cluster-level dedupe (unchanged) ---
+        // --- Cluster-level dedupe ---
         const clusterSig = [
             fillColor,
             fillOpacity.toFixed(3),
@@ -2618,13 +2613,32 @@ function exportSVG() {
 
         if (emittedClusterSignatures.has(clusterSig)) continue;
         emittedClusterSignatures.add(clusterSig);
+
+        // --- Depth for ordering (world-space centroid projected) ---
+        const allWorldPoints = [];
+        for (const loop of loops) {
+            for (const v of loop) {
+                allWorldPoints.push(v); // already world-space
+            }
+        }
+        if (allWorldPoints.length === 0) continue;
+
+        const worldCentroid = centroid3D(allWorldPoints);
+        const ndc = worldCentroid.clone().project(activeCamera);
+        const depth = ndc.z;
+
+        svgItems.push({ depth, group: edgeGroup });
     }
+
+    svgItems.sort((a, b) => b.depth - a.depth);
+
+    const svgContent = svgItems.map(item => item.group).join("\n");
 
     return `
         <svg xmlns="http://www.w3.org/2000/svg"
              width="${width}" height="${height}"
              viewBox="0 0 ${width} ${height}">
-            ${svgPaths.join("\n")}
+            ${svgContent}
         </svg>
     `;
 }

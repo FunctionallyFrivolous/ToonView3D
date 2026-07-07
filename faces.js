@@ -2,13 +2,13 @@ import * as THREE from "https://esm.sh/three@0.164.0";
 
 import {
     editEdges,
-    boundaryEdges, getBoundaryEdges, setBoundaryEdges, clearBoundaryEdges,
-    HIGHLIGHT_LAYER,
-    closestPointOnSegment, collectRelatedEdges, highlightMultipleEdges,
-    applyEdgeStyle,
-    edgeOverrides, edgeStyles,
+    getBoundaryEdges,
+    closestPointOnSegment, collectRelatedEdges, 
     loadEdgeStyleIntoUI,
-    getEdgeStyle, paintClusterEdges, deselectEdge
+    getEdgeStyle, deselectEdge,
+    highlightSelectedEdges, selectedEdges, applyEdgeStyleToSelectedEdges,
+    selectClusterBoundaryEdges, selectMeshBoundaryEdges,
+    canonicalEdgeKey, globalEdgeMap
 } from "./edges.js";
 
 import { selectScope, scene, undoStack, redoStack} from "./scene.js";
@@ -19,6 +19,7 @@ export const parentToClusters = new WeakMap();
 export let currentSelectedMesh = null;
 
 export let currentSelectedCluster = null;
+export const selectedFaces = new Set();
 
 export let editFaces = true
 
@@ -44,13 +45,6 @@ faceModeCB.addEventListener("change", () => {
 });
 
 export function deselectAllFaces() {
-    
-    if (boundaryEdges) {
-        scene.remove(boundaryEdges);
-        boundaryEdges.geometry.dispose();
-        boundaryEdges.material.dispose();
-        clearBoundaryEdges()
-    }
 
     if (meshHighlights.length > 0) {
         meshHighlights.forEach(h => {
@@ -108,6 +102,61 @@ function selectWholeMesh(clusterMesh) {
     currentSelectedCluster = null;
 }
 
+export function highlightSelectedFaces() {
+    // Clear old highlights
+    if (meshHighlights.length > 0) {
+        meshHighlights.forEach(h => {
+            scene.remove(h);
+            h.geometry.dispose();
+            h.material.dispose();
+        });
+        meshHighlights = [];
+    }
+
+    if (selectedFaces.size === 0) return;
+
+    for (const sel of selectedFaces) {
+        const { mesh, cluster, faceIndex } = sel;
+
+        const geo = mesh.geometry;
+        const index = geo.index;
+        const pos = geo.attributes.position;
+
+        const i0 = index.getX(faceIndex * 3 + 0);
+        const i1 = index.getX(faceIndex * 3 + 1);
+        const i2 = index.getX(faceIndex * 3 + 2);
+
+        const p0 = new THREE.Vector3().fromBufferAttribute(pos, i0).applyMatrix4(mesh.matrixWorld);
+        const p1 = new THREE.Vector3().fromBufferAttribute(pos, i1).applyMatrix4(mesh.matrixWorld);
+        const p2 = new THREE.Vector3().fromBufferAttribute(pos, i2).applyMatrix4(mesh.matrixWorld);
+
+        const positions = [
+            p0.x, p0.y, p0.z, p1.x, p1.y, p1.z,
+            p1.x, p1.y, p1.z, p2.x, p2.y, p2.z,
+            p2.x, p2.y, p2.z, p0.x, p0.y, p0.z
+        ];
+
+        const lineGeo = new THREE.BufferGeometry();
+        lineGeo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+
+        const lineMat = new THREE.LineBasicMaterial({
+            color: 0xff0000,
+            linewidth: 2,
+            depthTest: false,
+            depthWrite: false
+        });
+
+        const line = new THREE.LineSegments(lineGeo, lineMat);
+        line.renderOrder = 999;
+
+        // Prevent highlight from blocking raycasts
+        line.raycast = () => {};
+
+        scene.add(line);
+        meshHighlights.push(line);
+    }
+}
+
 export function highlightFace(hit) {
     if (selectScope !== "1D") {
         deselectEdge();
@@ -124,19 +173,49 @@ export function highlightFace(hit) {
 
     deselectAllFaces();
 
+    // 3D: unified edge selection for entire mesh
     if (selectScope === "3D") {
-        selectWholeMesh(hit.object);
         const parent = clusterMesh.userData.parentMesh;
+
+        // Toggle: if any edge from this mesh is selected, deselect all of them
+        let meshAlreadySelected = false;
+
+        for (const s of selectedEdges) {
+            if (s.mesh.userData.parentMesh === parent) {
+                meshAlreadySelected = true;
+                break;
+            }
+        }
+
+        if (meshAlreadySelected) {
+            const toRemove = [];
+            for (const s of selectedEdges) {
+                if (s.mesh.userData.parentMesh === parent) {
+                    toRemove.push(s);
+                }
+            }
+            toRemove.forEach(s => selectedEdges.delete(s));
+        } else {
+            selectMeshBoundaryEdges(parent);
+        }
+
+        currentSelectedMesh = parent;
+        currentSelectedCluster = null;
+
+        highlightSelectedEdges();
+
+        if (editEdges) {
+            applyEdgeStyleToSelectedEdges();
+        } else {
+            loadEdgeStyleIntoUI(clusterMesh, clusterMesh.userData.cluster, 0);
+        }
+
         paintWholeMesh(parent, color, opacity, style)
 
-        loadFacePropertiesFromCluster(clusterMesh, cluster);
-        loadEdgeStyleIntoUI(clusterMesh, cluster);
         return;
     }
 
-    currentSelectedMesh = clusterMesh;
-    currentSelectedCluster = cluster;
-
+    // 1D: edge multi-select (with related-edge chain selection, robust across 2D/3D)
     if (selectScope === "1D") {
         let mesh = clusterMesh;
         const clickPoint = hit.point.clone();
@@ -147,11 +226,12 @@ export function highlightFace(hit) {
         let bestIndex = -1;
         let bestDist = Infinity;
 
+        // Find nearest edge
         for (let i = 0; i < arr.length; i += 6) {
             const edgeIndex = i / 6;
 
-            const p1 = new THREE.Vector3(arr[i + 0], arr[i + 1], arr[i + 2]).applyMatrix4(mesh.matrixWorld);
-            const p2 = new THREE.Vector3(arr[i + 3], arr[i + 4], arr[i + 5]).applyMatrix4(mesh.matrixWorld);
+            const p1 = new THREE.Vector3(arr[i], arr[i+1], arr[i+2]).applyMatrix4(mesh.matrixWorld);
+            const p2 = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]).applyMatrix4(mesh.matrixWorld);
 
             const cp = closestPointOnSegment(clickPoint, p1, p2);
             const dist = cp.distanceTo(clickPoint);
@@ -163,92 +243,126 @@ export function highlightFace(hit) {
         }
 
         if (bestIndex !== -1) {
-            const clusterIndex = mesh.userData.clusterIndex;
-            const meshOverrides = edgeOverrides.get(mesh);
-            const clusterOverrides = meshOverrides ? meshOverrides.get(clusterIndex) : null;
+            // 1) Get related edges (curvature-aware chain)
+            const related = collectRelatedEdges(mesh, cluster, bestIndex);
 
-            // Get style of the selected edge
-            const selectedStyle =
-                clusterOverrides && clusterOverrides.get(bestIndex)
-                    ? clusterOverrides.get(bestIndex)
-                    : edgeStyles.get(mesh).get(clusterIndex);
+            // 2) For each related edge, toggle all its twins via globalEdgeMap
+            for (const ei of related) {
+                const i = ei * 6;
 
-            // If selected edge is hidden, switch to visible twin
-            if (selectedStyle.width === 0) {
-
-                const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
-                const arr = edgeAttr.array;
-
-                const i = bestIndex * 6;
                 const p1World = new THREE.Vector3(arr[i], arr[i+1], arr[i+2]).applyMatrix4(mesh.matrixWorld);
                 const p2World = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]).applyMatrix4(mesh.matrixWorld);
 
                 const key = canonicalEdgeKey(p1World, p2World);
+
                 const twins = globalEdgeMap.get(key) || [];
 
+                // Determine if this edge (any twin) is currently selected
+                let anySelected = false;
                 for (const twin of twins) {
-                    const twinOverrides = edgeOverrides.get(twin.mesh);
-                    const twinClusterOverrides = twinOverrides ? twinOverrides.get(twin.clusterIndex) : null;
+                    for (const s of selectedEdges) {
+                        if (s.mesh === twin.mesh && s.edgeIndex === twin.edgeIndex) {
+                            anySelected = true;
+                            break;
+                        }
+                    }
+                    if (anySelected) break;
+                }
 
-                    const twinStyle =
-                        twinClusterOverrides && twinClusterOverrides.get(twin.edgeIndex)
-                            ? twinClusterOverrides.get(twin.edgeIndex)
-                            : edgeStyles.get(twin.mesh).get(twin.clusterIndex);
-
-                    if (twinStyle.width > 0) {
-                        // Switch selection to visible twin
-                        mesh = twin.mesh;
-                        cluster = twin.mesh.userData.cluster;
-                        bestIndex = twin.edgeIndex;
-                        break;
+                if (anySelected) {
+                    // Deselect all twins
+                    const toRemove = [];
+                    for (const twin of twins) {
+                        for (const s of selectedEdges) {
+                            if (s.mesh === twin.mesh && s.edgeIndex === twin.edgeIndex) {
+                                toRemove.push(s);
+                            }
+                        }
+                    }
+                    toRemove.forEach(s => selectedEdges.delete(s));
+                } else {
+                    // Select all twins
+                    for (const twin of twins) {
+                        // Avoid duplicates
+                        let exists = false;
+                        for (const s of selectedEdges) {
+                            if (s.mesh === twin.mesh && s.edgeIndex === twin.edgeIndex) {
+                                exists = true;
+                                break;
+                            }
+                        }
+                        if (!exists) {
+                            selectedEdges.add({
+                                mesh: twin.mesh,
+                                cluster: twin.mesh.userData.cluster,
+                                edgeIndex: twin.edgeIndex
+                            });
+                        }
                     }
                 }
             }
-            const related = collectRelatedEdges(mesh, cluster, bestIndex);
-            highlightMultipleEdges(mesh, cluster, related);
 
-            if (editEdges) applyEdgeStyle();
-            else loadEdgeStyleIntoUI(mesh, cluster, bestIndex); 
+            highlightSelectedEdges();
+
+            if (editEdges) {
+                applyEdgeStyleToSelectedEdges();
+            } else {
+                loadEdgeStyleIntoUI(mesh, cluster, bestIndex);
+            }
         }
+
         return;
     }
 
-    if (!editFaces) loadFacePropertiesFromCluster(clusterMesh, cluster);
-    if (!editEdges) loadEdgeStyleIntoUI(clusterMesh, cluster);
+    // 2D: unified edge selection for cluster boundaries
+    if (selectScope === "2D") {
 
-    paintClusterFace(clusterMesh, cluster, color, opacity);
-    paintClusterEdges(clusterMesh, cluster, style);
+        const mesh = clusterMesh;
+        const cluster = mesh.userData.cluster;
 
-    const geometry = clusterMesh.geometry;
+        currentSelectedMesh = clusterMesh;
+        currentSelectedCluster = cluster;
 
-    if (boundaryEdges) {
-        scene.remove(boundaryEdges);
-        boundaryEdges.geometry.dispose();
-        boundaryEdges.material.dispose();
-        clearBoundaryEdges()
-    }
+        // Toggle cluster selection: if any boundary edge is selected, deselect all
+        let clusterAlreadySelected = false;
 
-    const edgeAttr = getBoundaryEdges(geometry, cluster);
+        for (const s of selectedEdges) {
+            if (s.mesh === mesh && s.cluster === cluster) {
+                clusterAlreadySelected = true;
+                break;
+            }
+        }
 
-    if (edgeAttr.count > 0) {
-        const boundaryGeo = new THREE.BufferGeometry();
-        boundaryGeo.setAttribute("position", edgeAttr);
+        if (clusterAlreadySelected) {
+            // Remove all edges belonging to this cluster
+            const toRemove = [];
+            for (const s of selectedEdges) {
+                if (s.mesh === mesh && s.cluster === cluster) {
+                    toRemove.push(s);
+                }
+            }
+            toRemove.forEach(s => selectedEdges.delete(s));
+        } else {
+            // Add all boundary edges of this cluster
+            selectClusterBoundaryEdges(mesh, cluster);
+        }
 
-        const boundaryMat = new THREE.LineBasicMaterial({
-            color: 0xff0000,
-            linewidth: 1
-        });
+        // Update highlight
+        highlightSelectedEdges();
 
-        setBoundaryEdges(new THREE.LineSegments(boundaryGeo, boundaryMat))
+        // Apply edge style if in edit mode
+        if (editEdges) {
+            applyEdgeStyleToSelectedEdges();
+        } else {
+            loadEdgeStyleIntoUI(mesh, cluster, 0);
+        }
 
-        boundaryEdges.applyMatrix4(clusterMesh.matrixWorld);
-        boundaryEdges.material.depthTest = false;
-        boundaryEdges.material.depthWrite = false;
-        boundaryEdges.renderOrder = 999;
+        if (!editFaces) loadFacePropertiesFromCluster(clusterMesh, cluster);
+        if (!editEdges) loadEdgeStyleIntoUI(mesh, cluster, hit.point); //loadEdgeStyleIntoUI(clusterMesh, cluster);
 
-        boundaryEdges.layers.set(HIGHLIGHT_LAYER);
-        scene.add(boundaryEdges);
-        boundaryEdges.raycast = () => {};
+        paintClusterFace(clusterMesh, cluster, color, opacity);
+
+        return;
     }
 }
 
@@ -357,6 +471,5 @@ function paintWholeMesh(parent, color, opacity, edgeStyle) {
     const clusters = parentToClusters.get(parent);
     clusters.forEach(cm => {
         paintClusterFace(cm, cm.userData.cluster, color, opacity);
-        paintClusterEdges(cm, cm.userData.cluster, edgeStyle);
     });
 }

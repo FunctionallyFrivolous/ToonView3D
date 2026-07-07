@@ -10,7 +10,7 @@ import {
     edgeOverrides,
     updatePersistentEdgeLinesForCluster,
     deselectEdge,
-    paintClusterEdges
+    highlightSelectedEdges, selectedEdges
 } from "./edges.js";
 import {
     parentToClusters,
@@ -518,7 +518,7 @@ function undo() {
     }
 
     if (op.type === "edgeStyle") {
-        paintClusterEdges(op.mesh, op.cluster, op.style, false);
+        applyEdgeStyleToSelectedEdges()
     }
 
     redoStack.push(op);
@@ -534,7 +534,7 @@ function redo() {
     }
 
     if (op.type === "edgeStyle") {
-        paintClusterEdges(op.mesh, op.cluster, op.style, false);
+        applyEdgeStyleToSelectedEdges()
     }
 
     undoStack.push(op);
@@ -598,7 +598,10 @@ window.addEventListener("pointerup", (e) => {
     if (moved) return;
     if (e.target !== renderer.domElement) return; // ignore clicks outside of canvas
     deselectAllFaces()
-    deselectEdge()
+    // deselectEdge()
+    // selectedEdges.clear();
+    highlightSelectedEdges();
+
 
     const rect = renderer.domElement.getBoundingClientRect();
 
@@ -700,8 +703,8 @@ select3DRadio.addEventListener("change", () => {
 select2DRadio.addEventListener("change", () => {
     if (select2DRadio.checked) {
         selectScope = "2D";
-        deselectAllFaces();
-        deselectEdge();
+        // deselectAllFaces();
+        // deselectEdge();
 
         opacityInput.disabled = editFaces ? false : true
         colorInput.disabled = editFaces ? false : true

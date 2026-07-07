@@ -132,8 +132,10 @@
       position: relative;
       overflow: hidden;
     ">
-      <button id="renderButton"; style = "display:auto">Render High‑Res</button>
+      <button id="renderButton"; style = "display:auto">Render Current View</button>
       <button id="saveRenderButton"; style = "display:auto">Save Image</button>
+      <button id="revertView">Revert to Rendered View</button>
+      <br>
       <button id="saveSVGButton">Save SVG</button>
       <button id="silhouetteButton"; style = "display:none">Show Silhouetted Surfaces</button>
       <button id="splitSilhouetteButton"; style = "display:none">Split Silhouetted Surfaces</button>
@@ -151,8 +153,6 @@
       </div>
     </div>
     
-    <script src="handlers.js"></script>
     <script type="module" src="./main.js"></script>
-    <!-- <script src="globals.js"></script> -->
   </body>
 </html>

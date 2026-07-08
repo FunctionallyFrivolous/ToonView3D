@@ -19,7 +19,7 @@ import {
     faceModeCB,
     editFaces,
     highlightFace,
-    paintClusterFace
+    paintClusterFace,
 } from "./faces.js";
 import { exportSVG } from "./svgExport.js";
 
@@ -186,7 +186,6 @@ function loadOBJFromString(objText, name = "model.obj") {
     if (typeof initializeModel === "function") {
         initializeModel(object);
     }
-    // console.log(currentModel)
 }
 
 if (colorPanel) {
@@ -564,7 +563,6 @@ function renderScene(){
     window.lastRenderDataURL = dataURL;
 
     scene.background = new THREE.Color(backgroundColor.value)
-    // console.log("hi")
 
     tempCamPos = activeCamera.position.toArray()
     tempCamQuat = activeCamera.quaternion.toArray()
@@ -597,11 +595,10 @@ window.addEventListener("pointerup", (e) => {
     pointerDown = false;
     if (moved) return;
     if (e.target !== renderer.domElement) return; // ignore clicks outside of canvas
-    deselectAllFaces()
+    // deselectAllFaces()
     // deselectEdge()
     // selectedEdges.clear();
-    highlightSelectedEdges();
-
+    // highlightSelectedEdges();
 
     const rect = renderer.domElement.getBoundingClientRect();
 
@@ -686,8 +683,6 @@ window.addEventListener("resize", () => {
 select3DRadio.addEventListener("change", () => {
     if (select3DRadio.checked) {
         selectScope = "3D";
-        deselectAllFaces();
-        deselectEdge();
 
         opacityInput.disabled = editFaces ? false : true
         colorInput.disabled = editFaces ? false : true
@@ -703,8 +698,6 @@ select3DRadio.addEventListener("change", () => {
 select2DRadio.addEventListener("change", () => {
     if (select2DRadio.checked) {
         selectScope = "2D";
-        // deselectAllFaces();
-        // deselectEdge();
 
         opacityInput.disabled = editFaces ? false : true
         colorInput.disabled = editFaces ? false : true
@@ -720,7 +713,6 @@ select2DRadio.addEventListener("change", () => {
 select1DRadio.addEventListener("change", () => {
     if (select1DRadio.checked) {
         selectScope = "1D";
-        deselectAllFaces();
 
         opacityInput.disabled = true
         colorInput.disabled = true

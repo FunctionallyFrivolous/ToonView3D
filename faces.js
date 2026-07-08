@@ -7,18 +7,15 @@ import {
     loadEdgeStyleIntoUI,
     getEdgeStyle, deselectEdge,
     highlightSelectedEdges, selectedEdges, applyEdgeStyleToSelectedEdges,
-    selectClusterBoundaryEdges, selectMeshBoundaryEdges,
-    canonicalEdgeKey, globalEdgeMap
+    selectClusterBoundaryEdges,
+    canonicalEdgeKey, globalEdgeMap,
+    removeFaceEdgesFromSelection, addFaceEdgesToSelection
 } from "./edges.js";
 
 import { selectScope, scene, undoStack, redoStack} from "./scene.js";
 
-
 export const parentToClusters = new WeakMap();
 
-export let currentSelectedMesh = null;
-
-export let currentSelectedCluster = null;
 export const selectedFaces = new Set();
 
 export let editFaces = true
@@ -55,112 +52,10 @@ export function deselectAllFaces() {
         meshHighlights = [];
     }
 
-    currentSelectedMesh = null;
-    currentSelectedCluster = null;
-}
-
-function selectWholeMesh(clusterMesh) {
-    deselectAllFaces();
-    deselectEdge()
-
-    const parent = clusterMesh.userData.parentMesh;
-    if (!parent) return;
-
-    const clusters = parentToClusters.get(parent);
-    if (!clusters) return;
-
-    meshHighlights = [];
-
-    // Highlight all boundary edges for all clusters
-    clusters.forEach(cm => {
-        const cluster = cm.userData.cluster;
-
-        const edgeAttr = getBoundaryEdges(cm.geometry, cluster);
-        if (edgeAttr.count === 0) return;
-
-        const boundaryGeo = new THREE.BufferGeometry();
-        boundaryGeo.setAttribute("position", edgeAttr);
-
-        const boundaryMat = new THREE.LineBasicMaterial({
-            color: 0xff0000,
-            linewidth: 1
-        });
-
-        const boundary = new THREE.LineSegments(boundaryGeo, boundaryMat);
-        boundary.applyMatrix4(cm.matrixWorld);
-        boundary.material.depthTest = false;
-        boundary.material.depthWrite = false;
-        boundary.renderOrder = 999;
-
-        scene.add(boundary);
-
-        meshHighlights.push(boundary);
-    });
-
-    // Store selection state
-    currentSelectedMesh = parent;
-    currentSelectedCluster = null;
-}
-
-export function highlightSelectedFaces() {
-    // Clear old highlights
-    if (meshHighlights.length > 0) {
-        meshHighlights.forEach(h => {
-            scene.remove(h);
-            h.geometry.dispose();
-            h.material.dispose();
-        });
-        meshHighlights = [];
-    }
-
-    if (selectedFaces.size === 0) return;
-
-    for (const sel of selectedFaces) {
-        const { mesh, cluster, faceIndex } = sel;
-
-        const geo = mesh.geometry;
-        const index = geo.index;
-        const pos = geo.attributes.position;
-
-        const i0 = index.getX(faceIndex * 3 + 0);
-        const i1 = index.getX(faceIndex * 3 + 1);
-        const i2 = index.getX(faceIndex * 3 + 2);
-
-        const p0 = new THREE.Vector3().fromBufferAttribute(pos, i0).applyMatrix4(mesh.matrixWorld);
-        const p1 = new THREE.Vector3().fromBufferAttribute(pos, i1).applyMatrix4(mesh.matrixWorld);
-        const p2 = new THREE.Vector3().fromBufferAttribute(pos, i2).applyMatrix4(mesh.matrixWorld);
-
-        const positions = [
-            p0.x, p0.y, p0.z, p1.x, p1.y, p1.z,
-            p1.x, p1.y, p1.z, p2.x, p2.y, p2.z,
-            p2.x, p2.y, p2.z, p0.x, p0.y, p0.z
-        ];
-
-        const lineGeo = new THREE.BufferGeometry();
-        lineGeo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-
-        const lineMat = new THREE.LineBasicMaterial({
-            color: 0xff0000,
-            linewidth: 2,
-            depthTest: false,
-            depthWrite: false
-        });
-
-        const line = new THREE.LineSegments(lineGeo, lineMat);
-        line.renderOrder = 999;
-
-        // Prevent highlight from blocking raycasts
-        line.raycast = () => {};
-
-        scene.add(line);
-        meshHighlights.push(line);
-    }
+    selectedFaces.clear()
 }
 
 export function highlightFace(hit) {
-    if (selectScope !== "1D") {
-        deselectEdge();
-    }
 
     const color = new THREE.Color(colorInput.value);
     const opacity = parseFloat(opacityInput.value);
@@ -171,11 +66,10 @@ export function highlightFace(hit) {
     let cluster = clusterMesh.userData.cluster;
     if (!cluster) return;
 
-    deselectAllFaces();
-
     // 3D: unified edge selection for entire mesh
     if (selectScope === "3D") {
         const parent = clusterMesh.userData.parentMesh;
+        const clusters = parentToClusters.get(parent);
 
         // Toggle: if any edge from this mesh is selected, deselect all of them
         let meshAlreadySelected = false;
@@ -194,13 +88,23 @@ export function highlightFace(hit) {
                     toRemove.push(s);
                 }
             }
-            toRemove.forEach(s => selectedEdges.delete(s));
+            toRemove.forEach(sel => {
+                selectedFaces.delete(sel);
+                removeFaceEdgesFromSelection(sel.mesh, sel.cluster);
+            });
         } else {
-            selectMeshBoundaryEdges(parent);
-        }
+            // Select ALL clusters belonging to this mesh
+            clusters.forEach(cm => {
+                const cluster = cm.userData.cluster;
 
-        currentSelectedMesh = parent;
-        currentSelectedCluster = null;
+                selectedFaces.add({
+                    mesh: cm,
+                    cluster
+                });
+
+                addFaceEdgesToSelection(cm, cluster);
+            });
+        }
 
         highlightSelectedEdges();
 
@@ -302,6 +206,8 @@ export function highlightFace(hit) {
                 }
             }
 
+            pruneClustersFromEdgeDeselection();
+
             highlightSelectedEdges();
 
             if (editEdges) {
@@ -319,9 +225,6 @@ export function highlightFace(hit) {
 
         const mesh = clusterMesh;
         const cluster = mesh.userData.cluster;
-
-        currentSelectedMesh = clusterMesh;
-        currentSelectedCluster = cluster;
 
         // Toggle cluster selection: if any boundary edge is selected, deselect all
         let clusterAlreadySelected = false;
@@ -347,8 +250,32 @@ export function highlightFace(hit) {
             selectClusterBoundaryEdges(mesh, cluster);
         }
 
-        // Update highlight
-        highlightSelectedEdges();
+        // --- FACE MODE (multi-select clusters) ---
+        // const clusterMesh = hit.object;
+        // const cluster = clusterMesh.userData.cluster;
+        if (!cluster) return;
+
+        // Check if this cluster is already selected
+        let already = null;
+        for (const sel of selectedFaces) {
+            if (sel.mesh === clusterMesh) {
+                already = sel;
+                break;
+            }
+        }
+
+        if (already) {
+            // Toggle OFF
+            selectedFaces.delete(already);
+            removeFaceEdgesFromSelection(clusterMesh, cluster);
+        } else {
+            // Toggle ON
+            selectedFaces.add({
+                mesh: clusterMesh,
+                cluster
+            });
+            addFaceEdgesToSelection(clusterMesh, cluster);
+        }
 
         // Apply edge style if in edit mode
         if (editEdges) {
@@ -356,14 +283,50 @@ export function highlightFace(hit) {
         } else {
             loadEdgeStyleIntoUI(mesh, cluster, 0);
         }
-
+        
         if (!editFaces) loadFacePropertiesFromCluster(clusterMesh, cluster);
         if (!editEdges) loadEdgeStyleIntoUI(mesh, cluster, hit.point); //loadEdgeStyleIntoUI(clusterMesh, cluster);
 
         paintClusterFace(clusterMesh, cluster, color, opacity);
-
+        
         return;
     }
+}
+
+function pruneClustersFromEdgeDeselection() {
+    const toRemove = [];
+
+    for (const sel of selectedFaces) {
+        const { mesh, cluster } = sel;
+
+        const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+        const arr = edgeAttr.array;
+
+        let clusterStillSelected = true;
+
+        for (let i = 0; i < arr.length; i += 6) {
+            const edgeIndex = i / 6;
+
+            let found = false;
+            for (const s of selectedEdges) {
+                if (s.mesh === mesh && s.edgeIndex === edgeIndex) {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                clusterStillSelected = false;
+                break;
+            }
+        }
+
+        if (!clusterStillSelected) {
+            toRemove.push(sel);
+        }
+    }
+
+    toRemove.forEach(sel => selectedFaces.delete(sel));
 }
 
 function loadFacePropertiesFromCluster(mesh, cluster) {
@@ -386,20 +349,13 @@ function loadFacePropertiesFromCluster(mesh, cluster) {
 }
 
 function applyUIFacePaint() {
-
     const color = new THREE.Color(colorInput.value);
     const opacity = parseFloat(opacityInput.value);
 
-    if (selectScope === "3D") {
-        const clusters = parentToClusters.get(currentSelectedMesh);
-        if (!clusters) return;
-        clusters.forEach(cm => {
-            paintClusterFace(cm, cm.userData.cluster, color, opacity);
-        });
-    } 
-    else {
-        if (!currentSelectedMesh || !currentSelectedCluster) return;
-        paintClusterFace(currentSelectedMesh, currentSelectedCluster, color, opacity);
+    // Paint ALL selected faces
+    for (const sel of selectedFaces) {
+        const { mesh, cluster } = sel;
+        paintClusterFace(mesh, cluster, color, opacity);
     }
 }
 

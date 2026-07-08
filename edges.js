@@ -14,8 +14,8 @@ let edgeDepthBias = 0.0001;
 
 export let editEdges = true 
 
-let currentSelectedEdge = null; // { mesh, cluster, edgeIndex, p1, p2 }
 export let selectedEdges = new Set()
+export let edgeHighlight = null;
 
 export const HIGHLIGHT_LAYER = 2; 
 
@@ -70,37 +70,51 @@ export function selectClusterBoundaryEdges(mesh, cluster) {
     }
 }
 
-export function selectMeshBoundaryEdges(parentMesh) {
-    const clusters = parentToClusters.get(parentMesh);
-    if (!clusters) return;
+export function addFaceEdgesToSelection(mesh, cluster) {
+    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+    const arr = edgeAttr.array;
 
-    for (const clusterMesh of clusters) {
-        const cluster = clusterMesh.userData.cluster;
+    for (let i = 0; i < arr.length; i += 6) {
+        const edgeIndex = i / 6;
 
-        const edgeAttr = getBoundaryEdges(clusterMesh.geometry, cluster);
-        const arr = edgeAttr.array;
-
-        for (let i = 0; i < arr.length; i += 6) {
-            const edgeIndex = i / 6;
-
-            let found = null;
-            for (const s of selectedEdges) {
-                if (s.mesh === clusterMesh && s.cluster === cluster && s.edgeIndex === edgeIndex) {
-                    found = s;
-                    break;
-                }
+        // Avoid duplicates
+        let exists = false;
+        for (const s of selectedEdges) {
+            if (s.mesh === mesh && s.edgeIndex === edgeIndex) {
+                exists = true;
+                break;
             }
-
-            if (!found) {
-                selectedEdges.add({
-                    mesh: clusterMesh,
-                    cluster,
-                    edgeIndex
-                });
-            }
+        }
+        if (!exists) {
+            selectedEdges.add({
+                mesh,
+                cluster,
+                edgeIndex
+            });
         }
     }
 }
+
+export function removeFaceEdgesFromSelection(mesh, cluster) {
+    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+    const arr = edgeAttr.array;
+
+    const toRemove = [];
+
+    for (let i = 0; i < arr.length; i += 6) {
+        const edgeIndex = i / 6;
+
+        for (const s of selectedEdges) {
+            if (s.mesh === mesh && s.edgeIndex === edgeIndex) {
+                toRemove.push(s);
+            }
+        }
+    }
+
+    toRemove.forEach(s => selectedEdges.delete(s));
+}
+
+
 
 export function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
     const clusterIndex = mesh.userData.clusterIndex;
@@ -232,8 +246,6 @@ export function getBoundaryEdges(geometry, cluster) {
     }
     return new THREE.Float32BufferAttribute(boundaryPositions, 3);
 }
-
-export let edgeHighlight = null;
 
 export function getEdgeStyle(
     color=new THREE.Color(edgeColorInput.value), 
@@ -535,12 +547,6 @@ export function highlightMultipleEdges(mesh, cluster, edgeIndices) {
     edgeHighlight.raycast = () => {};
 
     scene.add(edgeHighlight);
-
-    currentSelectedEdge = {
-        mesh,
-        cluster,
-        edgeIndices
-    };
 }
 
 export function deselectEdge() {

@@ -5,23 +5,24 @@ import {
     getBoundaryEdges,
     closestPointOnSegment, collectRelatedEdges, 
     loadEdgeStyleIntoUI,
-    getEdgeStyle, deselectEdge,
+    getEdgeStyle,
     highlightSelectedEdges, selectedEdges, applyEdgeStyleToSelectedEdges,
-    selectClusterBoundaryEdges,
     canonicalEdgeKey, globalEdgeMap,
-    removeFaceEdgesFromSelection, addFaceEdgesToSelection
+    removeFaceEdgesFromSelection
 } from "./edges.js";
 
-import { selectScope, scene, undoStack, redoStack} from "./scene.js";
+import { selectScope, scene, undoStack, redoStack,
+    orientCameraToFace
+} from "./scene.js";
 
 export const parentToClusters = new WeakMap();
 
-export const selectedFaces = new Set();
+const selectedFaces = new Set();
 
-export let editFaces = true
+let editFaces = true
 
-export const colorInput = document.getElementById("faceColor");
-export const opacityInput = document.getElementById("faceOpacity");
+const colorInput = document.getElementById("faceColor");
+const opacityInput = document.getElementById("faceOpacity");
 colorInput.addEventListener("input", applyUIFacePaint);
 opacityInput.addEventListener("input", applyUIFacePaint);
 
@@ -57,6 +58,8 @@ export function deselectAllFaces() {
 
 export function highlightFace(hit) {
 
+    // orientCameraToFace(hit)
+
     const color = new THREE.Color(colorInput.value);
     const opacity = parseFloat(opacityInput.value);
 
@@ -71,7 +74,6 @@ export function highlightFace(hit) {
         const parent = clusterMesh.userData.parentMesh;
         const clusters = parentToClusters.get(parent);
 
-        // Toggle: if any edge from this mesh is selected, deselect all of them
         let meshAlreadySelected = false;
 
         for (const s of selectedEdges) {
@@ -80,6 +82,8 @@ export function highlightFace(hit) {
                 break;
             }
         }
+
+        deselectAllFaces()
 
         if (meshAlreadySelected) {
             const toRemove = [];
@@ -285,9 +289,11 @@ export function highlightFace(hit) {
         }
         
         if (!editFaces) loadFacePropertiesFromCluster(clusterMesh, cluster);
-        if (!editEdges) loadEdgeStyleIntoUI(mesh, cluster, hit.point); //loadEdgeStyleIntoUI(clusterMesh, cluster);
+        if (!editEdges) loadEdgeStyleIntoUI(mesh, cluster, hit.point);
 
         paintClusterFace(clusterMesh, cluster, color, opacity);
+
+        highlightSelectedEdges();
         
         return;
     }
@@ -428,4 +434,51 @@ function paintWholeMesh(parent, color, opacity, edgeStyle) {
     clusters.forEach(cm => {
         paintClusterFace(cm, cm.userData.cluster, color, opacity);
     });
+}
+
+function selectClusterBoundaryEdges(mesh, cluster) {
+    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+    const arr = edgeAttr.array;
+
+    for (let i = 0; i < arr.length; i += 6) {
+        const edgeIndex = i / 6;
+
+        // Add to selectedEdges if not already present
+        let found = null;
+        for (const s of selectedEdges) {
+            if (s.mesh === mesh && s.cluster === cluster && s.edgeIndex === edgeIndex) {
+                found = s;
+                break;
+            }
+        }
+
+        if (!found) {
+            selectedEdges.add({ mesh, cluster, edgeIndex });
+        }
+    }
+}
+
+function addFaceEdgesToSelection(mesh, cluster) {
+    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
+    const arr = edgeAttr.array;
+
+    for (let i = 0; i < arr.length; i += 6) {
+        const edgeIndex = i / 6;
+
+        // Avoid duplicates
+        let exists = false;
+        for (const s of selectedEdges) {
+            if (s.mesh === mesh && s.edgeIndex === edgeIndex) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            selectedEdges.add({
+                mesh,
+                cluster,
+                edgeIndex
+            });
+        }
+    }
 }

@@ -4,7 +4,7 @@ import { LineMaterial } from "https://esm.sh/three@0.164.0/examples/jsm/lines/Li
 import { LineSegments2 } from "https://esm.sh/three@0.164.0/examples/jsm/lines/LineSegments2.js";
 
 import {currentModel, scene, selectScope, undoStack, redoStack} from "./scene.js";
-import {parentToClusters} from "./faces.js";
+// import {parentToClusters} from "./faces.js";
 
 export const edgeStyles = new WeakMap();          // mesh → Map(clusterIndex → style)
 export const persistentEdgeLines = new WeakMap(); // mesh → Map(clusterIndex → LineSegments2)
@@ -19,10 +19,10 @@ export let edgeHighlight = null;
 
 export const HIGHLIGHT_LAYER = 2; 
 
-export const edgeColorInput = document.getElementById("edgeColor");
-export const edgeWidthInput = document.getElementById("edgeWidth");
-export const edgeDashScaleInput = document.getElementById("edgeDashScale");
-export const edgeDashedInput = document.getElementById("edgeDashed");
+const edgeColorInput = document.getElementById("edgeColor");
+const edgeWidthInput = document.getElementById("edgeWidth");
+const edgeDashScaleInput = document.getElementById("edgeDashScale");
+const edgeDashedInput = document.getElementById("edgeDashed");
 
 edgeColorInput.addEventListener("input", applyEdgeStyleToSelectedEdges);
 edgeWidthInput.addEventListener("input", applyEdgeStyleToSelectedEdges);
@@ -32,7 +32,6 @@ edgeDashedInput.addEventListener("change", applyEdgeStyleToSelectedEdges);
 const edgeModeCB = document.getElementById("edgeModeRadio");
 
 edgeModeCB.addEventListener("change", () => {
-    // if (!faceModeCB.checked && !edgeModeCB.checked) edgeModeCB.checked = true
     if (edgeModeCB.checked) {
         editEdges = true
         edgeColorInput.disabled = false
@@ -47,53 +46,6 @@ edgeModeCB.addEventListener("change", () => {
         edgeDashedInput.disabled = true
     }
 });
-
-export function selectClusterBoundaryEdges(mesh, cluster) {
-    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
-    const arr = edgeAttr.array;
-
-    for (let i = 0; i < arr.length; i += 6) {
-        const edgeIndex = i / 6;
-
-        // Add to selectedEdges if not already present
-        let found = null;
-        for (const s of selectedEdges) {
-            if (s.mesh === mesh && s.cluster === cluster && s.edgeIndex === edgeIndex) {
-                found = s;
-                break;
-            }
-        }
-
-        if (!found) {
-            selectedEdges.add({ mesh, cluster, edgeIndex });
-        }
-    }
-}
-
-export function addFaceEdgesToSelection(mesh, cluster) {
-    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
-    const arr = edgeAttr.array;
-
-    for (let i = 0; i < arr.length; i += 6) {
-        const edgeIndex = i / 6;
-
-        // Avoid duplicates
-        let exists = false;
-        for (const s of selectedEdges) {
-            if (s.mesh === mesh && s.edgeIndex === edgeIndex) {
-                exists = true;
-                break;
-            }
-        }
-        if (!exists) {
-            selectedEdges.add({
-                mesh,
-                cluster,
-                edgeIndex
-            });
-        }
-    }
-}
 
 export function removeFaceEdgesFromSelection(mesh, cluster) {
     const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
@@ -113,8 +65,6 @@ export function removeFaceEdgesFromSelection(mesh, cluster) {
 
     toRemove.forEach(s => selectedEdges.delete(s));
 }
-
-
 
 export function updatePersistentEdgeLinesForCluster(mesh, cluster, clusterStyle) {
     const clusterIndex = mesh.userData.clusterIndex;
@@ -483,47 +433,6 @@ export function highlightSelectedEdges() {
         const arr = edgeAttr.array;
 
         const i = edgeIndex * 6;
-
-        const p1 = new THREE.Vector3(arr[i], arr[i+1], arr[i+2]).applyMatrix4(mesh.matrixWorld);
-        const p2 = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]).applyMatrix4(mesh.matrixWorld);
-
-        positions.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
-    }
-
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-
-    const mat = new THREE.LineBasicMaterial({
-        color: 0xff0000,
-        linewidth: 5,
-        depthTest: false,
-        depthWrite: false
-    });
-
-    edgeHighlight = new THREE.LineSegments(geo, mat);
-    edgeHighlight.renderOrder = 999;
-
-    edgeHighlight.raycast = () => {};
-
-    scene.add(edgeHighlight);
-}
-
-export function highlightMultipleEdges(mesh, cluster, edgeIndices) {
-    // Clear previous highlight
-    if (edgeHighlight) {
-        scene.remove(edgeHighlight);
-        edgeHighlight.geometry.dispose();
-        edgeHighlight.material.dispose();
-        edgeHighlight = null;
-    }
-
-    const edgeAttr = getBoundaryEdges(mesh.geometry, cluster);
-    const arr = edgeAttr.array;
-
-    const positions = [];
-
-    for (const ei of edgeIndices) {
-        const i = ei * 6;
 
         const p1 = new THREE.Vector3(arr[i], arr[i+1], arr[i+2]).applyMatrix4(mesh.matrixWorld);
         const p2 = new THREE.Vector3(arr[i+3], arr[i+4], arr[i+5]).applyMatrix4(mesh.matrixWorld);

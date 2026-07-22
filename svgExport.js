@@ -4,62 +4,319 @@ import {currentModel, scene, renderer, activeCamera, buildClusterMesh } from "./
 import {paintClusterFace, parentToClusters} from "./faces.js";
 import {edgeStyles, edgeOverrides, getBoundaryEdges, buildBoundaryEdgeGraph, persistentEdgeLines, updatePersistentEdgeLinesForCluster} from "./edges.js";
 
+// export function exportSVG() {
+//     if (!currentModel) return;
+
+//     const width  = renderer.domElement.width;
+//     const height = renderer.domElement.height;
+
+//     const svgItems = [];
+
+//     const clusterMeshes = [];
+//     currentModel.traverse(o => {
+//         if (o.isMesh && o.userData.cluster && o.userData.clusterIndex != null) {
+//             clusterMeshes.push(o);
+//         }
+//     });
+
+//     const emittedClusterSignatures = new Set();
+
+//     function signedArea2D(pts) {
+//         let a = 0;
+//         for (let i = 0; i < pts.length; i++) {
+//             const [x1, y1] = pts[i];
+//             const [x2, y2] = pts[(i + 1) % pts.length];
+//             a += (x1 * y2 - x2 * y1);
+//         }
+//         return 0.5 * a;
+//     }
+
+//     function centroid2D(pts) {
+//         let x = 0, y = 0;
+//         for (const p of pts) { x += p[0]; y += p[1]; }
+//         return [x / pts.length, y / pts.length];
+//     }
+
+//     function pointInPolygon(point, poly) {
+//         const [px, py] = point;
+//         let inside = false;
+//         for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+//             const [xi, yi] = poly[i];
+//             const [xj, yj] = poly[j];
+//             const intersect =
+//                 ((yi > py) !== (yj > py)) &&
+//                 (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi);
+//             if (intersect) inside = !inside;
+//         }
+//         return inside;
+//     }
+
+//     function centroid3D(points) {
+//         const c = new THREE.Vector3();
+//         for (const p of points) c.add(p);
+//         c.divideScalar(points.length);
+//         return c;
+//     }
+
+//     for (const mesh of clusterMeshes) {
+
+//         const cluster = mesh.userData.cluster;
+//         const clusterIndex = mesh.userData.clusterIndex;
+//         if (!cluster || cluster.length === 0) continue;
+
+//         const geo    = mesh.geometry;
+//         const index  = geo.index;
+//         const colors = geo.attributes.color;
+
+//         // --- Face fill color ---
+//         const f0 = cluster[0];
+//         const i0 = index.getX(f0 * 3 + 0);
+
+//         const lr = colors.getX(i0);
+//         const lg = colors.getY(i0);
+//         const lb = colors.getZ(i0);
+//         const a  = colors.getW(i0);
+
+//         const srgb = new THREE.Color(lr, lg, lb).convertLinearToSRGB();
+//         const fillColor   = `rgb(${Math.round(srgb.r * 255)},${Math.round(srgb.g * 255)},${Math.round(srgb.b * 255)})`;
+//         const fillOpacity = a;
+
+//         // --- Edge style ---
+//         const style = edgeStyles.get(mesh)?.get(clusterIndex);
+//         if (!style) continue;
+
+//         const strokeColor = style.color.clone().getStyle();
+
+//         // --- Boundary edges for fill ---
+//         const edgeAttr = getBoundaryEdges(geo, cluster);
+//         if (!edgeAttr || edgeAttr.count === 0) continue;
+
+//         const segments = [];
+//         for (let i = 0; i < edgeAttr.count; i += 2) {
+//             const v1 = new THREE.Vector3(
+//                 edgeAttr.array[i*3+0],
+//                 edgeAttr.array[i*3+1],
+//                 edgeAttr.array[i*3+2]
+//             ).applyMatrix4(mesh.matrixWorld);
+
+//             const v2 = new THREE.Vector3(
+//                 edgeAttr.array[(i+1)*3+0],
+//                 edgeAttr.array[(i+1)*3+1],
+//                 edgeAttr.array[(i+1)*3+2]
+//             ).applyMatrix4(mesh.matrixWorld);
+
+//             segments.push([v1, v2]);
+//         }
+
+//         // --- Build loops ---
+//         let loops = buildOrderedLoops(segments);
+//         if (!loops || loops.length === 0) continue;
+
+//         // Deduplicate loops
+//         const seenLoopSigs = new Set();
+//         const uniqueLoops  = [];
+
+//         for (const loop of loops) {
+//             const sig = loopSignature(loop);
+//             if (!seenLoopSigs.has(sig)) {
+//                 seenLoopSigs.add(sig);
+//                 uniqueLoops.push(loop);
+//             }
+//         }
+//         loops = uniqueLoops;
+//         if (loops.length === 0) continue;
+
+//         // --- Project loops ---
+//         const loopInfos = [];
+//         const clusterGeomSigParts = [];
+
+//         for (const loop of loops) {
+//             const projected = loop.map(v => {
+//                 const p = v.clone().project(activeCamera);
+//                 return [
+//                     (p.x * 0.5 + 0.5) * width,
+//                     (1 - (p.y * 0.5 + 0.5)) * height
+//                 ];
+//             });
+
+//             const area = signedArea2D(projected);
+
+//             clusterGeomSigParts.push(
+//                 projected
+//                     .map(p => `${p[0].toFixed(2)},${p[1].toFixed(2)}`)
+//                     .sort()
+//                     .join("|")
+//             );
+
+//             loopInfos.push({ projected, area });
+//         }
+
+//         // --- Classify holes ---
+//         for (const li of loopInfos) {
+//             const c = centroid2D(li.projected);
+//             li.isHole = false;
+
+//             for (const other of loopInfos) {
+//                 if (other === li) continue;
+//                 if (Math.abs(other.area) < Math.abs(li.area)) continue;
+//                 if (pointInPolygon(c, other.projected)) {
+//                     li.isHole = true;
+//                     break;
+//                 }
+//             }
+//         }
+
+//         // --- Build SVG path for fill ---
+//         let d = "";
+
+//         for (const li of loopInfos) {
+//             let pts = li.projected;
+
+//             if (!li.isHole) {
+//                 if (li.area < 0) pts = pts.slice().reverse();
+//             } else {
+//                 if (li.area > 0) pts = pts.slice().reverse();
+//             }
+
+//             d += pts.map((p, i) => {
+//                 const cmd = (i === 0) ? "M" : "L";
+//                 return `${cmd} ${p[0]},${p[1]}`;
+//             }).join(" ") + " Z ";
+//         }
+
+//         let fillPath = `
+//             <path d="${d}"
+//                 fill="${fillColor}"
+//                 fill-opacity="${fillOpacity}"
+//                 stroke="none"
+//                 fill-rule="nonzero"
+//             />
+//         `;
+
+//         // --- STROKES: chain grouping ---
+//         let edgeGroup = `<g id="cluster-${clusterIndex}-group">`;
+//         edgeGroup += fillPath;
+
+//         const meshOverrides = edgeOverrides.get(mesh);
+//         const clusterOverrides = meshOverrides ? meshOverrides.get(clusterIndex) : null;
+
+//         const chains = collectAllEdgeChains(mesh, cluster);
+
+//         for (const chain of chains) {
+
+//             let chainStyle = null;
+//             let chainVisible = false;
+
+//             for (const e of chain) {
+//                 const edgeIndex = e.index;
+
+//                 const s = clusterOverrides && clusterOverrides.get(edgeIndex)
+//                     ? clusterOverrides.get(edgeIndex)
+//                     : style;
+
+//                 if (s.width > 0) {
+//                     chainVisible = true;
+//                     chainStyle = s;
+//                 }
+//             }
+
+//             if (!chainVisible || !chainStyle) continue;
+
+//             const verts = orderChainVertices(chain);
+
+//             const verts3D = verts.map(v => v.clone());
+//             const smooth3D = smoothChain3D(verts3D, 0.35);
+
+//             const verts2D = smooth3D.map(v => {
+//                 const p = v.clone().project(activeCamera);
+//                 return [
+//                     (p.x * 0.5 + 0.5) * width,
+//                     (1 - (p.y * 0.5 + 0.5)) * height
+//                 ];
+//             });
+
+//             const dStroke = buildQuadraticBezierPath(verts2D, 0.5);
+
+//             const strokeColorChain = chainStyle.color.clone().getStyle();
+//             const dash = chainStyle.dashed
+//                 ? `stroke-dasharray="${chainStyle.dashScale * 70}"`
+//                 : "";
+
+//             edgeGroup += `
+//                 <path d="${dStroke}"
+//                     fill="none"
+//                     stroke="${strokeColorChain}"
+//                     stroke-width="${chainStyle.width}"
+//                     stroke-linecap="round"
+//                     stroke-linejoin="round"
+//                     ${dash}
+//                 />
+//             `;
+//         }
+
+//         edgeGroup += `</g>`;
+
+//         // --- Cluster-level dedupe ---
+//         const clusterSig = [
+//             fillColor,
+//             fillOpacity.toFixed(3),
+//             strokeColor,
+//             style.width.toFixed(3),
+//             style.dashed ? style.dashScale.toFixed(3) : "solid",
+//             clusterGeomSigParts.sort().join("||")
+//         ].join("::");
+
+//         if (emittedClusterSignatures.has(clusterSig)) continue;
+//         emittedClusterSignatures.add(clusterSig);
+
+//         // --- Depth for ordering (world-space centroid projected) ---
+//         const allWorldPoints = [];
+//         for (const loop of loops) {
+//             for (const v of loop) {
+//                 allWorldPoints.push(v); // already world-space
+//             }
+//         }
+//         if (allWorldPoints.length === 0) continue;
+
+//         const worldCentroid = centroid3D(allWorldPoints);
+//         const ndc = worldCentroid.clone().project(activeCamera);
+//         const depth = ndc.z;
+
+//         svgItems.push({ depth, group: edgeGroup });
+//     }
+
+//     svgItems.sort((a, b) => b.depth - a.depth);
+
+//     const svgContent = svgItems.map(item => item.group).join("\n");
+
+//     return `
+//         <svg xmlns="http://www.w3.org/2000/svg"
+//              width="${width}" height="${height}"
+//              viewBox="0 0 ${width} ${height}">
+//             ${svgContent}
+//         </svg>
+//     `;
+// }
+
 export function exportSVG() {
     if (!currentModel) return;
 
     const width  = renderer.domElement.width;
     const height = renderer.domElement.height;
 
-    const svgItems = [];
+    // ------------------------------------------------------------
+    // 1. Build effective mesh list (original + silhouette splits)
+    // ------------------------------------------------------------
+    const effectiveMeshes = buildEffectiveMeshesForSVG();
 
-    const clusterMeshes = [];
-    currentModel.traverse(o => {
-        if (o.isMesh && o.userData.cluster && o.userData.clusterIndex != null) {
-            clusterMeshes.push(o);
-        }
-    });
+    // ------------------------------------------------------------
+    // 2. Convert meshes → SVG items (same as your original logic)
+    // ------------------------------------------------------------
+    const svgItems = [];
 
     const emittedClusterSignatures = new Set();
 
-    function signedArea2D(pts) {
-        let a = 0;
-        for (let i = 0; i < pts.length; i++) {
-            const [x1, y1] = pts[i];
-            const [x2, y2] = pts[(i + 1) % pts.length];
-            a += (x1 * y2 - x2 * y1);
-        }
-        return 0.5 * a;
-    }
-
-    function centroid2D(pts) {
-        let x = 0, y = 0;
-        for (const p of pts) { x += p[0]; y += p[1]; }
-        return [x / pts.length, y / pts.length];
-    }
-
-    function pointInPolygon(point, poly) {
-        const [px, py] = point;
-        let inside = false;
-        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-            const [xi, yi] = poly[i];
-            const [xj, yj] = poly[j];
-            const intersect =
-                ((yi > py) !== (yj > py)) &&
-                (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi);
-            if (intersect) inside = !inside;
-        }
-        return inside;
-    }
-
-    function centroid3D(points) {
-        const c = new THREE.Vector3();
-        for (const p of points) c.add(p);
-        c.divideScalar(points.length);
-        return c;
-    }
-
-    for (const mesh of clusterMeshes) {
-
+    for (const mesh of effectiveMeshes) {
         const cluster = mesh.userData.cluster;
         const clusterIndex = mesh.userData.clusterIndex;
         if (!cluster || cluster.length === 0) continue;
@@ -87,7 +344,7 @@ export function exportSVG() {
 
         const strokeColor = style.color.clone().getStyle();
 
-        // --- Boundary edges for fill ---
+        // --- Boundary edges ---
         const edgeAttr = getBoundaryEdges(geo, cluster);
         if (!edgeAttr || edgeAttr.count === 0) continue;
 
@@ -266,25 +523,29 @@ export function exportSVG() {
             clusterGeomSigParts.sort().join("||")
         ].join("::");
 
-        if (emittedClusterSignatures.has(clusterSig)) continue;
-        emittedClusterSignatures.add(clusterSig);
+        if (!emittedClusterSignatures.has(clusterSig)) {
+            emittedClusterSignatures.add(clusterSig);
 
-        // --- Depth for ordering (world-space centroid projected) ---
-        const allWorldPoints = [];
-        for (const loop of loops) {
-            for (const v of loop) {
-                allWorldPoints.push(v); // already world-space
+            // --- Depth ordering ---
+            const allWorldPoints = [];
+            for (const loop of loops) {
+                for (const v of loop) {
+                    allWorldPoints.push(v);
+                }
             }
+            if (allWorldPoints.length === 0) continue;
+
+            const worldCentroid = centroid3D(allWorldPoints);
+            const ndc = worldCentroid.clone().project(activeCamera);
+            const depth = ndc.z;
+
+            svgItems.push({ depth, group: edgeGroup });
         }
-        if (allWorldPoints.length === 0) continue;
-
-        const worldCentroid = centroid3D(allWorldPoints);
-        const ndc = worldCentroid.clone().project(activeCamera);
-        const depth = ndc.z;
-
-        svgItems.push({ depth, group: edgeGroup });
     }
 
+    // ------------------------------------------------------------
+    // 3. Sort by depth and assemble final SVG
+    // ------------------------------------------------------------
     svgItems.sort((a, b) => b.depth - a.depth);
 
     const svgContent = svgItems.map(item => item.group).join("\n");
@@ -297,6 +558,104 @@ export function exportSVG() {
         </svg>
     `;
 }
+
+function signedArea2D(pts) {
+    let a = 0;
+    for (let i = 0; i < pts.length; i++) {
+        const [x1, y1] = pts[i];
+        const [x2, y2] = pts[(i + 1) % pts.length];
+        a += (x1 * y2 - x2 * y1);
+    }
+    return 0.5 * a;
+}
+
+function centroid2D(pts) {
+    let x = 0, y = 0;
+    for (const p of pts) { x += p[0]; y += p[1]; }
+    return [x / pts.length, y / pts.length];
+}
+
+function pointInPolygon(point, poly) {
+    const [px, py] = point;
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [xi, yi] = poly[i];
+        const [xj, yj] = poly[j];
+        const intersect =
+            ((yi > py) !== (yj > py)) &&
+            (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi);
+        if (intersect) inside = !inside;
+    }
+    return inside;
+}
+
+function centroid3D(points) {
+    const c = new THREE.Vector3();
+    for (const p of points) c.add(p);
+    c.divideScalar(points.length);
+    return c;
+}
+
+function buildEffectiveMeshesForSVG() {
+    const effective = [];
+
+    // Gather original cluster meshes
+    const clusterMeshes = [];
+    currentModel.traverse(o => {
+        if (o.isMesh && o.userData.cluster && o.userData.clusterIndex != null) {
+            clusterMeshes.push(o);
+        }
+    });
+
+    // Detect silhouettes (same logic as viewer)
+    const silhouettes = detectSilhouettedClusters();
+
+    for (const mesh of clusterMeshes) {
+        if (!silhouettes.includes(mesh)) {
+            effective.push(mesh);
+            continue;
+        }
+
+        // Split silhouette cluster
+        const { frontFaces, backFaces } = computeFrontBackFaces(mesh);
+        const result = splitSilhouetteCluster(mesh);
+        if (!result) {
+            effective.push(mesh);
+            continue;
+        }
+
+        const { frontMesh, backMesh } = result;
+
+        // Copy face colors
+        copyFaceColors(mesh, frontMesh, frontFaces);
+        copyFaceColors(mesh, backMesh,  backFaces);
+
+        // Copy edge styles
+        cloneEdgeStyles(mesh, frontMesh);
+        cloneEdgeStyles(mesh, backMesh);
+
+        // Force silhouette splits to have NO strokes
+        const fStyle = edgeStyles.get(frontMesh).get(frontMesh.userData.clusterIndex);
+        const bStyle = edgeStyles.get(backMesh).get(backMesh.userData.clusterIndex);
+
+        fStyle.width = 0;
+        fStyle.dashed = false;
+        fStyle.dashScale = 0;
+
+        bStyle.width = 0;
+        bStyle.dashed = false;
+        bStyle.dashScale = 0;
+
+        // Clear overrides so nothing re-enables strokes
+        edgeOverrides.get(frontMesh).set(frontMesh.userData.clusterIndex, new Map());
+        edgeOverrides.get(backMesh).set(backMesh.userData.clusterIndex, new Map());
+
+        effective.push(frontMesh, backMesh);
+    }
+
+    return effective;
+}
+
 
 function buildOrderedLoops(segments) {
     const adj = new Map();
@@ -669,7 +1028,10 @@ function computeFrontBackFaces(mesh) {
             .applyMatrix3(normalMatrix)
             .normalize();
 
-        const viewDir = centroid.clone().sub(activeCamera.position).normalize();
+        // const viewDir = centroid.clone().sub(activeCamera.position).normalize();
+        // const dot = n.dot(viewDir);
+        const viewDir = new THREE.Vector3();
+        activeCamera.getWorldDirection(viewDir);   // always correct for ortho or perspective
         const dot = n.dot(viewDir);
 
         if (dot < 0) frontFaces.push(f);

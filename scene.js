@@ -4,20 +4,16 @@ import { OrbitControls } from "https://esm.sh/three@0.164.0/examples/jsm/control
 import { OBJLoader } from "https://esm.sh/three@0.164.0/examples/jsm/loaders/OBJLoader.js";
 import { mergeVertices } from "https://esm.sh/three@0.164.0/examples/jsm/utils/BufferGeometryUtils.js";
 import {
-    edgeStyles, edgeColorInput, edgeWidthInput, edgeDashedInput, edgeDashScaleInput,
-    editEdges,
+    edgeStyles,
     persistentEdgeLines,
     edgeOverrides,
     updatePersistentEdgeLinesForCluster,
-    deselectEdge,
-    highlightSelectedEdges, selectedEdges
+    deselectEdge
 } from "./edges.js";
 import {
     parentToClusters,
     deselectAllFaces,
-    opacityInput, colorInput,
     faceModeCB,
-    editFaces,
     highlightFace,
     paintClusterFace,
 } from "./faces.js";
@@ -445,8 +441,14 @@ function updateAllLineResolutions() {
 }
 
 export function animate() {
+
+    // if (snapViewCB.checked) {
+    //     constrainCameraToNormal();
+    // }
+
     requestAnimationFrame(animate);
     controls.update();
+    
     renderer.render(scene, activeCamera);
 
     // renderScene()
@@ -595,10 +597,6 @@ window.addEventListener("pointerup", (e) => {
     pointerDown = false;
     if (moved) return;
     if (e.target !== renderer.domElement) return; // ignore clicks outside of canvas
-    // deselectAllFaces()
-    // deselectEdge()
-    // selectedEdges.clear();
-    // highlightSelectedEdges();
 
     const rect = renderer.domElement.getBoundingClientRect();
 
@@ -641,6 +639,8 @@ document.getElementById("renderButton").addEventListener("click", () => {
     deselectEdge()
 
     renderScene()
+
+    document.getElementById("revertView").textContent = "Revert to Rendered View"
 });
 
 document.getElementById("revertView").addEventListener("click", () => {
@@ -651,6 +651,7 @@ document.getElementById("revertView").addEventListener("click", () => {
     activeCamera.quaternion.fromArray(tempCamQuat);
 
     controls.enableDamping = true;
+
 });
 
 // Save button
@@ -684,14 +685,6 @@ select3DRadio.addEventListener("change", () => {
     if (select3DRadio.checked) {
         selectScope = "3D";
 
-        opacityInput.disabled = editFaces ? false : true
-        colorInput.disabled = editFaces ? false : true
-
-        edgeColorInput.disabled = editEdges ? false : true
-        edgeWidthInput.disabled = editEdges ? false : true
-        edgeDashScaleInput.disabled = editEdges ? false : true
-        edgeDashedInput.disabled = editEdges ? false : true
-
         faceModeCB.disabled = false
     }
 });
@@ -699,28 +692,12 @@ select2DRadio.addEventListener("change", () => {
     if (select2DRadio.checked) {
         selectScope = "2D";
 
-        opacityInput.disabled = editFaces ? false : true
-        colorInput.disabled = editFaces ? false : true
-
-        edgeColorInput.disabled = editEdges ? false : true
-        edgeWidthInput.disabled = editEdges ? false : true
-        edgeDashScaleInput.disabled = editEdges ? false : true
-        edgeDashedInput.disabled = editEdges ? false : true
-
         faceModeCB.disabled = false
     }
 });
 select1DRadio.addEventListener("change", () => {
     if (select1DRadio.checked) {
         selectScope = "1D";
-
-        opacityInput.disabled = true
-        colorInput.disabled = true
-
-        edgeColorInput.disabled = editEdges ? false : true
-        edgeWidthInput.disabled = editEdges ? false : true
-        edgeDashScaleInput.disabled = editEdges ? false : true
-        edgeDashedInput.disabled = editEdges ? false : true
 
         faceModeCB.disabled = true
     }
@@ -747,3 +724,121 @@ window.addEventListener("drop", async (e) => {
 });
 
 document.getElementById("viewerContainer").appendChild(renderer.domElement);
+
+// const snapViewCB = document.getElementById("snapView")
+
+// snapViewCB.addEventListener("change", () => {
+//     if (!snapViewCB.checked) {
+//         lockedNormal = null;
+//         lockedCenter = null;
+//     }
+// })
+
+export let lockedNormal = null;
+export let lockedCenter = null;
+export let lockedDistance = null;
+
+export function orientCameraToFace(hit, distance = 500) {
+    if (!snapViewCB.checked) return
+    
+    controls.enableDamping = false;
+    controls.update(); 
+    
+    const mesh = hit.object;
+    const geo = mesh.geometry;
+    const index = geo.index;
+
+    // Face index inside this cluster geometry
+    const faceIndex = hit.faceIndex; // THREE gives this
+
+    const i0 = index.getX(faceIndex * 3 + 0);
+    const i1 = index.getX(faceIndex * 3 + 1);
+    const i2 = index.getX(faceIndex * 3 + 2);
+
+    const pos = geo.attributes.position;
+
+    const v0 = new THREE.Vector3().fromBufferAttribute(pos, i0);
+    const v1 = new THREE.Vector3().fromBufferAttribute(pos, i1);
+    const v2 = new THREE.Vector3().fromBufferAttribute(pos, i2);
+
+    // Transform to world space
+    v0.applyMatrix4(mesh.matrixWorld);
+    v1.applyMatrix4(mesh.matrixWorld);
+    v2.applyMatrix4(mesh.matrixWorld);
+
+    // Compute normal
+    const normal = new THREE.Vector3()
+        .subVectors(v1, v0)
+        .cross(new THREE.Vector3().subVectors(v2, v0))
+        .normalize();
+
+    if (normal.dot(activeCamera.getWorldDirection(new THREE.Vector3())) > 0) {
+        normal.multiplyScalar(-1);
+    }
+
+    // Compute centroid
+    const centroid = new THREE.Vector3()
+        .add(v0).add(v1).add(v2)
+        .multiplyScalar(1 / 3);
+
+    // Position camera along the normal
+    const targetPos = new THREE.Vector3()
+        .copy(centroid)
+        .addScaledVector(normal, distance);
+
+    lockedNormal = normal.clone();     // world-space normal
+    lockedCenter = centroid.clone();   // world-space centroid
+
+    activeCamera.position.copy(targetPos);
+    activeCamera.lookAt(centroid);
+
+    // activeCamera.up.copy(mesh.getWorldDirection(new THREE.Vector3()));
+
+    // Update OrbitControls
+    controls.target.copy(centroid);
+    controls.update();
+
+    controls.enableDamping = true;
+    
+}
+
+function constrainCameraToNormal() {
+    if (!lockedNormal) return;
+
+    // Force camera to look at the locked center
+    activeCamera.lookAt(lockedCenter);
+
+    // Compute current forward direction
+    const forward = new THREE.Vector3();
+    activeCamera.getWorldDirection(forward);
+
+    // Project forward onto the locked normal
+    // If forward deviates, snap it back
+    const dot = forward.dot(lockedNormal);
+    if (Math.abs(dot - 1) > 0.0001) {
+        // Camera drifted — realign
+        const newPos = lockedCenter.clone().addScaledVector(lockedNormal, activeCamera.position.distanceTo(lockedCenter));
+        activeCamera.position.copy(newPos);
+        activeCamera.lookAt(lockedCenter);
+    }
+
+    // This locks panning
+    // controls.target.copy(lockedCenter);
+
+}
+
+function enableNormalLock() {
+    const forward = new THREE.Vector3();
+    activeCamera.getWorldDirection(forward);
+
+    const angle = forward.angleTo(lockedNormal);
+
+    controls.minPolarAngle = angle;
+    controls.maxPolarAngle = angle;
+
+    controls.target.copy(lockedCenter);
+}
+function disableNormalLock() {
+    controls.minPolarAngle = 0;
+    controls.maxPolarAngle = Math.PI;
+}

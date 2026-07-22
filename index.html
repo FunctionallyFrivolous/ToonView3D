@@ -108,6 +108,25 @@
       <input id="edgeBias" type="range" min="0.000001" max="0.00015" step="0.000001" value="0.0001">
     </div>
 
+    <!-- <div id="viewPanel" style="
+      /* position: fixed;
+      top: 420px;
+      right: 10px; */
+      /* width: 135px; */
+      background: #ffffffee;
+      padding: 12px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+      font-family: sans-serif;
+      z-index: 9999;
+    ">
+      <label>
+        <input type="checkbox" id="snapView">
+        Snap View
+      </label>
+
+    </div> -->
+
   </div>
 
   <body>
@@ -134,11 +153,11 @@
     ">
       <button id="renderButton"; style = "display:auto">Render Current View</button>
       <button id="saveRenderButton"; style = "display:auto">Save Image</button>
-      <button id="revertView">Revert to Rendered View</button>
+      <button id="revertView">Revert to Original View</button>
       <br>
       <button id="saveSVGButton">Save SVG</button>
-      <button id="silhouetteButton"; style = "display:none">Show Silhouetted Surfaces</button>
-      <button id="splitSilhouetteButton"; style = "display:none">Split Silhouetted Surfaces</button>
+      <button id="silhouetteButton"; style = "display:block">Show Silhouetted Surfaces</button>
+      <button id="splitSilhouetteButton"; style = "display:block">Split Silhouetted Surfaces</button>
 
 
       <div id="renderOutputContainer" style="
